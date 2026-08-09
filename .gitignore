@@ -1,6 +1,11 @@
 # Environment variables file
 .env
 
+# Databases. Canonical lives outside this repo and is shipped to the server as
+# an immutable artifact; this service only ever reads one. The trailing * also
+# covers the -wal/-shm/-journal sidecars.
+data/*.db*
+
 # Go build outputs
 *.exe
 *.exe~

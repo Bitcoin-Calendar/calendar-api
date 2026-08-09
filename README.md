@@ -1,19 +1,22 @@
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
 
-# Bitcoin Historical Events API & SQLite Database
+# Bitcoin Historical Events API
 
-This project provides a Go-based API server to access historical Bitcoin events stored in SQLite databases. It supports multiple languages for event data.
+A Go-based, **read-only** API server for historical Bitcoin events. It supports multiple
+languages for event data.
 
 ## Project Overview
 
 -   **API Server (`main.go`)**: A Fiber-based Go application that serves event data.
     -   Supports language selection via the `lang` query parameter (e.g., `lang=en`, `lang=ru`).
-    -   Connects to `events.db` (for English, default) and `events_ru.db` (for Russian).
+    -   Reads `events_en.db` (English, default) and `events_ru.db` (Russian).
     -   Requires an API key (`X-API-KEY` header) for authentication.
-    -   Uses environment variables for configuration (API key, database paths, port).
--   **Databases (`data/events.db`, `data/events_ru.db`)**: SQLite files containing event information.
-    -   Schema managed by GORM (see `database.go`).
--   **Docker Support**: Includes a `Dockerfile` and `docker-compose.yml` for containerized deployment.
+    -   Uses environment variables for configuration (API keys, database paths, listen address).
+-   **Databases**: **not stored in this repository.** The canonical databases are authored and
+    validated elsewhere and shipped to the server as an immutable artifact
+    (`/srv/bitcal/data/current/events_{ru,en}.db`, mode `0444`, in a directory the service user
+    cannot write). This service opens them read-only and never writes, migrates, or creates
+    indexes, triggers or FTS tables — the artifact ships with its own.
 
 ## Key Features
 
