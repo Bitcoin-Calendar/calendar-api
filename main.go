@@ -173,7 +173,12 @@ func getTagsHandler(c *fiber.Ctx) error {
 	sqlQuery := `
 SELECT
     LOWER(j.value) AS tag,
-    COUNT(*) AS count
+    -- DISTINCT because a handful of events list the same tag twice in their
+    -- array (RU 160/231 'price', RU 333 and EN 155 'bitcoin'). COUNT(*) counted
+    -- occurrences, so 'bitcoin' read 446 here against 445 events from
+    -- /api/events/tags/bitcoin. This endpoint documents itself as counting
+    -- events, and now does.
+    COUNT(DISTINCT e.id) AS count
 FROM
     events e,
     json_each(e.tags) j
@@ -234,13 +239,27 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	var events []Event
 	var totalEvents int64
 
-	// Prepare the search term for LIKE query, expecting tags like ["tag1","searchtag","tag2"]
-	// This will search for the tag as a whole word within the JSON array string.
-	searchTerm := "%\"" + strings.ToLower(tagParam) + "\"%"
+	// Match the tag as a JSON array element, the same way /api/tags counts
+	// them, so the two endpoints cannot disagree about what a tag is.
+	//
+	// This replaces a LIKE '%"tag"%' substring match against the raw JSON. That
+	// matched the same rows for every tag in the current vocabulary, but it
+	// interpreted LIKE metacharacters in the caller's input: /api/events/tags/%
+	// returned all 582 RU events and /api/events/tags/_____ returned 246,
+	// because % and _ are wildcards. An equality test inside json_each cannot
+	// be steered that way, and it stops depending on how the JSON is spaced or
+	// quoted.
+	tagMatch := `EXISTS (
+		SELECT 1 FROM json_each(events.tags) j
+		WHERE json_valid(events.tags) = 1
+		  AND json_type(events.tags) = 'array'
+		  AND LOWER(j.value) = ?
+	)`
+	searchTag := strings.ToLower(tagParam)
 
 	// Get total count of events matching the tag
 	// We need to apply the Where condition for Count as well.
-	countQuery := db.Model(&Event{}).Where("LOWER(tags) LIKE ?", searchTerm)
+	countQuery := db.Model(&Event{}).Where(tagMatch, searchTag)
 	if err := countQuery.Count(&totalEvents).Error; err != nil {
 		zlog.Error().Str("tag", tagParam).Str("lang", lang).Err(err).Msg("getEventsByTagHandler: Failed to count events by tag")
 		return queryFailed(c, err, "Failed to count events by tag")
@@ -248,7 +267,7 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 
 	// Get paginated events matching the tag
 	// Default sort by date descending
-	dataQuery := db.Model(&Event{}).Order("date desc").Limit(limit).Offset(offset).Where("LOWER(tags) LIKE ?", searchTerm)
+	dataQuery := db.Model(&Event{}).Order("date desc").Limit(limit).Offset(offset).Where(tagMatch, searchTag)
 	if err := dataQuery.Find(&events).Error; err != nil {
 		zlog.Error().Str("tag", tagParam).Str("lang", lang).Int("page", page).Int("limit", limit).Err(err).Msg("getEventsByTagHandler: Failed to retrieve events by tag")
 		return queryFailed(c, err, "Failed to retrieve events by tag")
