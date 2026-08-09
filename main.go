@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle" // Added for secure API key comparison
-	"errors"        // Added for gorm.ErrRecordNotFound
-	"log"           // Added for log.Fatal
+	"encoding/hex"
+	"errors" // Added for gorm.ErrRecordNotFound
+	"fmt"
+	"log" // Added for log.Fatal
 	"os"
 	"os/signal"
 	"strconv" // Added for pagination
@@ -63,6 +66,72 @@ func getDBInstance(langCode string) *gorm.DB {
 // checks for cancellation and a runaway query runs until the process dies.
 func dbFor(c *fiber.Ctx) *gorm.DB {
 	return getDBInstance(c.Query("lang", "en")).WithContext(c.UserContext())
+}
+
+// isNumericInRange reports whether s is a plain integer within [lo, hi].
+// strconv.Atoi is deliberately strict here: it rejects "8.0", "+8" and " 8",
+// any of which would otherwise reach strftime and match nothing.
+func isNumericInRange(s string, lo, hi int) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= lo && n <= hi
+}
+
+// pad2 left-pads a validated 1–2 digit number to the two digits strftime emits.
+func pad2(s string) string {
+	if len(s) == 1 {
+		return "0" + s
+	}
+	return s
+}
+
+// badParam renders a rejected query parameter. It names the parameter, echoes
+// what was sent and says what would be accepted, so the caller can fix it
+// without reading the source.
+func badParam(c *fiber.Ctx, name, got, want string) error {
+	zlog.Warn().Str("param", name).Str("got", got).Msg("rejected query parameter")
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error": fmt.Sprintf("invalid %s %q: expected %s", name, got, want),
+	})
+}
+
+// ftsSyntaxErrors are the messages SQLite returns when the *caller's* search
+// string is not a valid FTS5 expression, as opposed to when something is wrong
+// with the server. Measured against the real artifact:
+//
+//	AND | ) | NOT | ()      fts5: syntax error near "…"
+//	*                       unknown special query:
+//	" (unbalanced)          unterminated string
+//
+// The SQL around the MATCH is a fixed string, so the only variable in these
+// statements is what the caller sent. Matching on the message is unpleasant —
+// the driver offers no error code for this — but the alternative is answering
+// 500 to a typo, which makes every 5xx alert untrustworthy.
+var ftsSyntaxErrors = []string{
+	"fts5: syntax error",
+	"unknown special query",
+	"unterminated string",
+	"malformed MATCH expression",
+}
+
+func isFTSSyntaxError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, s := range ftsSyntaxErrors {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// badSearchQuery answers a malformed search expression. It is logged at warn,
+// not error: the server is fine, the query was not.
+func badSearchQuery(c *fiber.Ctx, query, lang string, err error) error {
+	zlog.Warn().Str("query", query).Str("lang", lang).Err(err).Msg("ftsSearchHandler: malformed search query")
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error": "Invalid search query: it is not a valid full-text search expression. " +
+			"Bare operators (AND, OR, NOT), unbalanced parentheses or quotes, and a " +
+			"leading * are all rejected by SQLite. Quote the text to search for it literally.",
+	})
 }
 
 // queryFailed renders a failed query. A deadline is returned as an error so the
@@ -317,28 +386,34 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 	}
 	offset := (page - 1) * limit
 
-	var events []Event
+	events := []Event{}
 	var totalEvents int64
 	query := db.Model(&Event{})
 
-	// Apply date filters if they are provided
+	// Date filters are validated rather than passed through, because an
+	// unparseable value here matches nothing and the caller gets 200 with an
+	// empty list — identical to a day that genuinely has no events. A bot on
+	// that response posts nothing and reports success, so a typo in its date
+	// arithmetic would look exactly like a quiet day, indefinitely.
 	if yearStr != "" {
+		if !isNumericInRange(yearStr, 1000, 9999) {
+			return badParam(c, "year", yearStr, "a four-digit year")
+		}
 		query = query.Where("strftime('%Y', date) = ?", yearStr)
 	}
 	if monthStr != "" {
-		// Ensure month is two-digit ("01"–"12") so that it matches the %m format returned by strftime.
-		// Accept both single-digit ("1") and double-digit ("01") inputs.
-		if len(monthStr) == 1 {
-			monthStr = "0" + monthStr
+		if !isNumericInRange(monthStr, 1, 12) {
+			return badParam(c, "month", monthStr, "1–12")
 		}
-		query = query.Where("strftime('%m', date) = ?", monthStr)
+		// Two digits, to match what strftime('%m') returns. Both "1" and "01"
+		// are accepted from the caller.
+		query = query.Where("strftime('%m', date) = ?", pad2(monthStr))
 	}
 	if dayStr != "" {
-		// Similar padding for day ("01"–"31").
-		if len(dayStr) == 1 {
-			dayStr = "0" + dayStr
+		if !isNumericInRange(dayStr, 1, 31) {
+			return badParam(c, "day", dayStr, "1–31")
 		}
-		query = query.Where("strftime('%d', date) = ?", dayStr)
+		query = query.Where("strftime('%d', date) = ?", pad2(dayStr))
 	}
 
 	// First, get the total count of records that match the filter
@@ -393,7 +468,12 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	}
 	offset := (page - 1) * limit
 
-	var events []Event
+	// Initialised, not declared nil: this handler scans into the slice with
+	// Raw().Scan(), which leaves it nil when nothing matches, and a nil slice
+	// marshals to JSON null. Every other endpoint uses Find(), which sets an
+	// empty slice, so search was the one place a caller got null instead of []
+	// and had to special-case it.
+	events := []Event{}
 	var totalEvents int64
 
 	// Sanitize FTS query
@@ -406,6 +486,9 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		WHERE events_fts MATCH ?;
 	`
 	if err := db.Raw(countSQL, sanitizedQuery).Scan(&totalEvents).Error; err != nil {
+		if isFTSSyntaxError(err) {
+			return badSearchQuery(c, query, lang, err)
+		}
 		zlog.Error().Str("query", query).Str("lang", lang).Err(err).Msg("ftsSearchHandler: Failed to count search results")
 		return queryFailed(c, err, "Failed to count search results")
 	}
@@ -421,6 +504,9 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		LIMIT ? OFFSET ?;
 	`
 	if err := db.Raw(searchSQL, sanitizedQuery, limit, offset).Scan(&events).Error; err != nil {
+		if isFTSSyntaxError(err) {
+			return badSearchQuery(c, query, lang, err)
+		}
 		zlog.Error().Str("query", query).Str("lang", lang).Err(err).Msg("ftsSearchHandler: Failed to execute search")
 		return queryFailed(c, err, "Failed to execute search")
 	}
@@ -544,8 +630,23 @@ func main() {
 	app.Use(limiter.New(limiter.Config{
 		Max:        100,
 		Expiration: 1 * time.Minute,
+		// Key on the API key, not the IP. Every consumer of this service runs
+		// on the same box and talks to it over loopback, so c.IP() is 127.0.0.1
+		// for all of them and they would share a single 100/min budget — the
+		// Telegram bot, the site and anything else starving each other, with
+		// the only symptom being intermittent 429s that look like nothing.
+		//
+		// The key is hashed rather than used directly because this value ends
+		// up as a map key in the limiter's store, and a secret does not belong
+		// in a data structure that a future dump, metric or log line might
+		// expose. Unauthenticated requests fall back to the IP, which is what
+		// /health and /metrics use.
 		KeyGenerator: func(c *fiber.Ctx) string {
-			return c.IP()
+			if k := c.Get("X-API-KEY"); k != "" {
+				sum := sha256.Sum256([]byte(k))
+				return "key:" + hex.EncodeToString(sum[:8])
+			}
+			return "ip:" + c.IP()
 		},
 		LimitReached: func(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{

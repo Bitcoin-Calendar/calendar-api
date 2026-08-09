@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +20,10 @@ import (
 )
 
 const (
-	apiKey        = "test-key"
+	apiKey = "test-key"
+	// A second valid key, so the suite can prove the rate limiter gives each
+	// caller its own budget rather than one shared per-IP bucket.
+	apiKey2       = "test-key-2"
 	allowedOrigin = "http://localhost:3000"
 )
 
@@ -101,7 +105,7 @@ func run(m *testing.M) (int, error) {
 		fmt.Sprintf("LISTEN_ADDR=127.0.0.1:%d", port),
 		"DB_PATH_EN="+filepath.Join(artifactDir, "events_en.db"),
 		"DB_PATH_RU="+filepath.Join(artifactDir, "events_ru.db"),
-		"API_KEYS="+apiKey,
+		"API_KEYS="+apiKey+","+apiKey2,
 		"CORS_ALLOWED_ORIGINS="+allowedOrigin,
 	)
 	log, err := os.Create(filepath.Join(workDir, "server.log"))
@@ -340,11 +344,22 @@ func request(t *testing.T, method, path string, auth bool, into interface{}) int
 	}
 	defer res.Body.Close()
 
-	if into != nil && res.StatusCode == http.StatusOK {
+	switch {
+	case into == nil:
+		_, _ = io.Copy(io.Discard, res.Body)
+
+	case res.StatusCode == http.StatusOK:
 		if err := json.NewDecoder(res.Body).Decode(into); err != nil {
 			t.Fatalf("%s %s: decoding body: %v", method, path, err)
 		}
-	} else {
+
+	case strings.Contains(res.Header.Get("Content-Type"), "application/json"):
+		// Error responses are JSON too, and the tests that assert a 400 also
+		// assert the message explains itself. A decode failure here is not
+		// fatal: the status code is the primary assertion, the body advisory.
+		_ = json.NewDecoder(res.Body).Decode(into)
+
+	default:
 		_, _ = io.Copy(io.Discard, res.Body)
 	}
 	return res.StatusCode
