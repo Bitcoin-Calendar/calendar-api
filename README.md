@@ -54,9 +54,17 @@ make test
 ```
 
 `-tags fts5` is mandatory: the SQLite driver does not compile FTS5 in by default, and
-without it a binary builds and starts happily while every search returns 500. Build on
-Ubuntu/glibc or in a matching container (`make build-ubuntu`) — CGO ties the binary to its
-libc, so a Mac- or Alpine-built binary will not start on the server.
+without it every search fails at runtime with `no such module: fts5`. A build without the
+tag is refused outright — see `fts5_required.go`. Build on Ubuntu/glibc or in a matching
+container (`make build-ubuntu`) — CGO ties the binary to its libc, so a Mac- or
+Alpine-built binary will not start on the server.
+
+## Tests
+
+The suite is in `tests/` and is black-box: it builds this binary, stages a database fixture
+exactly as a release is staged (mode `0444`, in a `0555` directory), starts the service
+against it and drives it over HTTP. So `make test` also exercises the build, the read-only
+open, and the JSON contract the Telegram bot depends on.
 
 Deployment is a native systemd service, not Docker: see `deploy/bitcal-api.service`, whose
 comment header also records the manual release steps for a new database artifact.

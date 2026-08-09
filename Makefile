@@ -27,6 +27,9 @@ BUILD_FLAGS = -tags fts5 -ldflags "-X main.version=$(VERSION)"
 build:
 	$(BUILD_ENV) $(GO) build $(BUILD_FLAGS) -o $(BINARY) .
 
+# The suite lives in tests/ and is black-box: it builds this binary, starts it
+# against a fixture staged at 0444 in a 0555 directory, and drives it over
+# HTTP. That means `make test` also proves the build itself, including the tag.
 test:
 	$(BUILD_ENV) $(GO) test -tags fts5 ./...
 
