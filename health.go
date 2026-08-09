@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,18 +18,30 @@ var version = "dev"
 
 // DatabaseHealth describes one artifact as this process actually has it open.
 type DatabaseHealth struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-	Rows   int64  `json:"rows"`
+	Path   string    `json:"path"`
+	SHA256 string    `json:"sha256"`
+	Rows   int64     `json:"rows"`
+	FTS    FTSHealth `json:"fts"`
 }
 
 // HealthResponse is a cross-repo contract: the publisher asserts against it
 // after every release.
+//
+// Status is "ok", or "degraded" when an artifact opened successfully but its
+// full-text index does not cover every row. The endpoint answers 200 either
+// way: a degraded service is still serving, and returning a failure code would
+// have a load balancer pull a process that is answering correctly for
+// everything except the completeness of search. Read the field, not the code.
 type HealthResponse struct {
 	Status    string                    `json:"status"`
 	Version   string                    `json:"version"`
 	Databases map[string]DatabaseHealth `json:"databases"`
 }
+
+const (
+	statusOK       = "ok"
+	statusDegraded = "degraded"
+)
 
 // healthSnapshot is computed once at startup and served unchanged thereafter.
 var healthSnapshot HealthResponse
@@ -43,7 +56,7 @@ func buildHealthSnapshot(dbs map[string]struct {
 	DB   *gorm.DB
 }) (HealthResponse, error) {
 	snapshot := HealthResponse{
-		Status:    "ok",
+		Status:    statusOK,
 		Version:   version,
 		Databases: make(map[string]DatabaseHealth, len(dbs)),
 	}
@@ -66,10 +79,21 @@ func buildHealthSnapshot(dbs map[string]struct {
 			return HealthResponse{}, err
 		}
 
+		// A failure here aborts the boot: probeFTS only errors on conditions
+		// under which search cannot work at all.
+		fts, err := probeFTS(entry.DB, rows)
+		if err != nil {
+			return HealthResponse{}, fmt.Errorf("%s: %w", lang, err)
+		}
+		if !fts.Consistent {
+			snapshot.Status = statusDegraded
+		}
+
 		snapshot.Databases[lang] = DatabaseHealth{
 			Path:   resolved,
 			SHA256: sum,
 			Rows:   rows,
+			FTS:    fts,
 		}
 	}
 

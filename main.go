@@ -500,7 +500,24 @@ func main() {
 		zlog.Fatal().Err(err).Msg("Failed to build health snapshot")
 	}
 	for lang, info := range healthSnapshot.Databases {
-		zlog.Info().Str("lang", lang).Str("path", info.Path).Str("sha256", info.SHA256).Int64("rows", info.Rows).Msg("Artifact opened")
+		zlog.Info().
+			Str("lang", lang).
+			Str("path", info.Path).
+			Str("sha256", info.SHA256).
+			Int64("rows", info.Rows).
+			Int64("fts_indexed", info.FTS.Indexed).
+			Msg("Artifact opened")
+
+		// Not fatal: the service answers every other endpoint correctly, and
+		// taking it down would trade partial search for none at all. It is
+		// logged at warn and reported by /health so a release check catches it.
+		if !info.FTS.Consistent {
+			zlog.Warn().
+				Str("lang", lang).
+				Int64("rows", info.Rows).
+				Int64("fts_indexed", info.FTS.Indexed).
+				Msg("Full-text index does not cover every row: search will return incomplete results")
+		}
 	}
 
 	// --- Fiber App Initialization ---
