@@ -1,0 +1,92 @@
+# bitcal-api — systemd unit. Native service, not Docker.
+#
+# Install:
+#   sudo cp deploy/bitcal-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now bitcal-api
+#
+# ---------------------------------------------------------------------------
+# Releasing a database artifact — manual, for now. There is no publish script.
+# ---------------------------------------------------------------------------
+#
+#   1. Copy the validated databases into a new timestamped release directory:
+#
+#        R=/srv/bitcal/data/releases/$(date -u +%Y%m%dT%H%M%SZ)
+#        sudo -u deploy mkdir -p "$R"
+#        scp events_{ru,en}.db  deploy@host:"$R"/
+#
+#      Ship the bare .db only — no -wal, -shm or -journal beside it, and the
+#      file must not carry a WAL header (bytes 18/19 are 01 01 for delete
+#      mode, 02 02 for WAL). A WAL artifact cannot be opened read-only without
+#      write access to create its wal-index.
+#
+#   2. Make it immutable by permission, which is what the read-only rule is
+#      actually enforced by:
+#
+#        sudo chown deploy:deploy "$R"/events_*.db
+#        sudo chmod 0444 "$R"/events_*.db     # files: read-only to everyone
+#        sudo chmod 0555 "$R"                 # directory: not writable either
+#
+#   3. Flip the symlink and restart. The restart is mandatory — SQLite holds
+#      an open file descriptor, so flipping the symlink alone leaves the old
+#      inode being served:
+#
+#        sudo ln -sfn "$R" /srv/bitcal/data/current.new
+#        sudo mv -T /srv/bitcal/data/current.new /srv/bitcal/data/current
+#        sudo systemctl restart bitcal-api
+#
+#   4. Verify what is actually open, and compare against the checksums that
+#      shipped with the release:
+#
+#        curl -s localhost:3000/health | jq .
+#        # the "path" values must name the new release directory, and the
+#        # "sha256" values must match dbs/SHA256SUMS line for line.
+#
+#      If a hash differs, the service is serving a different file than you
+#      published — do not restart your way out of it, find out why.
+
+[Unit]
+Description=Bitcoin Calendar API (read-only)
+Documentation=https://github.com/Bitcoin-Calendar/calendar-api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bitcal
+Group=bitcal
+WorkingDirectory=/srv/bitcal
+ExecStart=/srv/bitcal/bin/bitcal-api
+Restart=on-failure
+RestartSec=5s
+
+# Loopback only. There is no public vhost and nginx does not proxy this.
+Environment=LISTEN_ADDR=127.0.0.1:3000
+Environment=DB_PATH_EN=/srv/bitcal/data/current/events_en.db
+Environment=DB_PATH_RU=/srv/bitcal/data/current/events_ru.db
+Environment=CORS_ALLOWED_ORIGINS=https://bitcoin-calendar.org
+# API_KEYS is a secret: keep it out of this file and out of git.
+EnvironmentFile=/etc/bitcal/api.env
+
+# --- Hardening -------------------------------------------------------------
+# The service reads an artifact it must never be able to write. ReadOnlyPaths
+# makes that structural rather than a convention: even if a future code change
+# tried to open a database read-write, the kernel refuses.
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/srv/bitcal/data
+ReadWritePaths=
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

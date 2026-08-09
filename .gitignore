@@ -16,6 +16,8 @@ data/*.db*
 # Output of go build
 api_server
 migrate_tool
+bitcal-api
+api_and_database
 
 # OS-specific files
 .DS_Store

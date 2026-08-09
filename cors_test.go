@@ -20,7 +20,7 @@ func setupAppForTests() *fiber.App {
 	// Apply the same CORS middleware as in production.
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     getAllowedOrigins(),
-		AllowMethods:     "GET,HEAD,OPTIONS,POST,PUT,DELETE",
+		AllowMethods:     "GET,HEAD,OPTIONS",
 		AllowHeaders:     "X-API-KEY,Content-Type",
 		AllowCredentials: false,
 	}))
