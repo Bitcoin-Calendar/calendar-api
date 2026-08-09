@@ -1,13 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle" // Added for secure API key comparison
-	// Added for parsing JSON tags
-	"errors" // Added for gorm.ErrRecordNotFound
-	// Added for io.MultiWriter
-	// Added for io.MultiWriter
-	"log"     // Added for log.Fatal
-	"os"      // Added for sorting tags, os.Stdout, os.MkdirAll, os.OpenFile
+	"errors"        // Added for gorm.ErrRecordNotFound
+	"log"           // Added for log.Fatal
+	"os"
 	"strconv" // Added for pagination
 	"strings" // Added for tag processing
 	"time"    // Added for rate limiter
@@ -17,11 +15,27 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"    // Added for CORS support
 	"github.com/gofiber/fiber/v2/middleware/limiter" // Added for rate limiting
 	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/timeout"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	zlog "github.com/rs/zerolog/log"
 	"gorm.io/gorm" // Added for gorm.ErrRecordNotFound
-	// GORM is already used by database.go, no need for direct import here unless using DB functions directly
+)
+
+// Timeouts. Nothing here should take milliseconds, let alone seconds: the
+// databases are a few hundred rows and every query is served from a local
+// file. These bounds exist so that a query which does misbehave fails visibly
+// instead of pinning a connection forever — /api/tags did exactly that, looping
+// inside rows.Next() with no error and no deadline to stop it.
+const (
+	// queryTimeout bounds the work a single request may do. It is enforced
+	// through the request's context, which GORM passes to the driver, so it
+	// aborts the query itself rather than merely abandoning the caller.
+	queryTimeout = 5 * time.Second
+
+	readTimeout  = 10 * time.Second
+	writeTimeout = 15 * time.Second // must exceed queryTimeout
+	idleTimeout  = 60 * time.Second
 )
 
 // Define global DB variables for English and Russian databases
@@ -34,6 +48,24 @@ func getDBInstance(langCode string) *gorm.DB {
 		return DB_RU
 	}
 	return DB_EN // Default to English
+}
+
+// dbFor returns the language's database bound to the request's context, so a
+// query cannot outlive the request that asked for it. Handlers must use this
+// rather than getDBInstance directly: without the context, go-sqlite3 never
+// checks for cancellation and a runaway query runs until the process dies.
+func dbFor(c *fiber.Ctx) *gorm.DB {
+	return getDBInstance(c.Query("lang", "en")).WithContext(c.UserContext())
+}
+
+// queryFailed renders a failed query. A deadline is returned as an error so the
+// timeout middleware can answer 408, which is worth distinguishing from the 500
+// that a genuinely broken query earns.
+func queryFailed(c *fiber.Ctx, err error, message string) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": message})
 }
 
 // Define a response structure for paginated events, matching your spec
@@ -73,7 +105,7 @@ func authMiddleware(c *fiber.Ctx) error {
 // New handler function for getting a single event
 func getEventHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
-	db := getDBInstance(lang)
+	db := dbFor(c)
 	id := c.Params("id")
 
 	zlog.Info().Str("id", id).Str("lang", lang).Msg("getEventHandler called")
@@ -104,9 +136,7 @@ func getEventHandler(c *fiber.Ctx) error {
 			})
 		}
 		zlog.Error().Str("id", id).Str("lang", lang).Err(result.Error).Msg("getEventHandler: Failed to retrieve event")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to retrieve event",
-		})
+		return queryFailed(c, result.Error, "Failed to retrieve event")
 	}
 	zlog.Info().Str("id", id).Str("lang", lang).Msg("getEventHandler: Successfully retrieved event")
 	return c.JSON(fiber.Map{"data": event})
@@ -121,7 +151,7 @@ type TagInfo struct {
 // Handler for /api/tags
 func getTagsHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
-	db := getDBInstance(lang)
+	db := dbFor(c)
 
 	zlog.Info().Str("lang", lang).Msg("getTagsHandler called")
 
@@ -162,9 +192,7 @@ ORDER BY
     tag ASC;`
 	if err := db.Raw(sqlQuery).Scan(&result).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getTagsHandler: Error executing raw SQL for tags")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to retrieve tags from database",
-		})
+		return queryFailed(c, err, "Failed to retrieve tags from database")
 	}
 
 	// Sorting is now handled by the SQL query's "ORDER BY tag ASC".
@@ -176,7 +204,7 @@ ORDER BY
 // Handler for /api/events/tags/{tag}
 func getEventsByTagHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
-	db := getDBInstance(lang)
+	db := dbFor(c)
 	tagParam := c.Params("tag")
 	pageStr := c.Query("page", "1")
 	limitStr := c.Query("limit", "20")
@@ -215,9 +243,7 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	countQuery := db.Model(&Event{}).Where("LOWER(tags) LIKE ?", searchTerm)
 	if err := countQuery.Count(&totalEvents).Error; err != nil {
 		zlog.Error().Str("tag", tagParam).Str("lang", lang).Err(err).Msg("getEventsByTagHandler: Failed to count events by tag")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to count events by tag",
-		})
+		return queryFailed(c, err, "Failed to count events by tag")
 	}
 
 	// Get paginated events matching the tag
@@ -225,9 +251,7 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	dataQuery := db.Model(&Event{}).Order("date desc").Limit(limit).Offset(offset).Where("LOWER(tags) LIKE ?", searchTerm)
 	if err := dataQuery.Find(&events).Error; err != nil {
 		zlog.Error().Str("tag", tagParam).Str("lang", lang).Int("page", page).Int("limit", limit).Err(err).Msg("getEventsByTagHandler: Failed to retrieve events by tag")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to retrieve events by tag",
-		})
+		return queryFailed(c, err, "Failed to retrieve events by tag")
 	}
 
 	totalPages := (totalEvents + int64(limit) - 1) / int64(limit)
@@ -247,7 +271,7 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 // Handler for getting all events (replaces the inline function in main)
 func getAllEventsHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en")
-	db := getDBInstance(lang)
+	db := dbFor(c)
 	pageStr := c.Query("page", "1")
 	limitStr := c.Query("limit", "20")
 	yearStr := c.Query("year")
@@ -293,17 +317,13 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 	// First, get the total count of records that match the filter
 	if err := query.Count(&totalEvents).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getAllEventsHandler: Failed to count events")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to count events",
-		})
+		return queryFailed(c, err, "Failed to count events")
 	}
 
 	// Then, apply pagination and retrieve the events
 	if err := query.Order("date desc").Limit(limit).Offset(offset).Find(&events).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getAllEventsHandler: Failed to retrieve events")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to retrieve events",
-		})
+		return queryFailed(c, err, "Failed to retrieve events")
 	}
 
 	totalPages := (totalEvents + int64(limit) - 1) / int64(limit)
@@ -324,7 +344,7 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 // Handler for FTS5 search
 func ftsSearchHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
-	db := getDBInstance(lang)
+	db := dbFor(c)
 	query := c.Query("q")
 	pageStr := c.Query("page", "1")
 	limitStr := c.Query("limit", "20")
@@ -360,7 +380,7 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	`
 	if err := db.Raw(countSQL, sanitizedQuery).Scan(&totalEvents).Error; err != nil {
 		zlog.Error().Str("query", query).Str("lang", lang).Err(err).Msg("ftsSearchHandler: Failed to count search results")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to count search results"})
+		return queryFailed(c, err, "Failed to count search results")
 	}
 
 	searchSQL := `
@@ -375,7 +395,7 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	`
 	if err := db.Raw(searchSQL, sanitizedQuery, limit, offset).Scan(&events).Error; err != nil {
 		zlog.Error().Str("query", query).Str("lang", lang).Err(err).Msg("ftsSearchHandler: Failed to execute search")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to execute search"})
+		return queryFailed(c, err, "Failed to execute search")
 	}
 
 	totalPages := (totalEvents + int64(limit) - 1) / int64(limit)
@@ -464,7 +484,13 @@ func main() {
 	}
 
 	// --- Fiber App Initialization ---
-	app := fiber.New()
+	// Connection-level bounds. These cap a slow or idle peer; they do not stop
+	// a handler that is stuck, which is what queryTimeout is for.
+	app := fiber.New(fiber.Config{
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
+	})
 
 	// --- Middleware ---
 	app.Use(logger.New(logger.Config{
@@ -500,13 +526,15 @@ func main() {
 
 	// Read-only endpoints. /api/events answers the date question via the
 	// month/day query parameters; there are deliberately no by-date routes.
-	api.Get("/events/:id", getEventHandler)
-	api.Get("/tags", getTagsHandler)
-	api.Get("/events/tags/:tag", getEventsByTagHandler)
-	api.Get("/events", getAllEventsHandler)
+	// Every handler that touches the database is wrapped so its query carries a
+	// deadline. dbFor picks the deadline up from the request context.
+	api.Get("/events/:id", timeout.NewWithContext(getEventHandler, queryTimeout))
+	api.Get("/tags", timeout.NewWithContext(getTagsHandler, queryTimeout))
+	api.Get("/events/tags/:tag", timeout.NewWithContext(getEventsByTagHandler, queryTimeout))
+	api.Get("/events", timeout.NewWithContext(getAllEventsHandler, queryTimeout))
 
 	// New FTS5 search endpoint, replacing the old /search
-	api.Get("/search", ftsSearchHandler)
+	api.Get("/search", timeout.NewWithContext(ftsSearchHandler, queryTimeout))
 
 	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 
