@@ -411,19 +411,50 @@ Error responses will typically be in JSON format, like:
         "en": {
           "path": "/srv/bitcal/data/releases/20260809T084800Z/events_en.db",
           "sha256": "cb95ad42a181aff3f2cf0579ee3f0d647b81db38c8f3228e1d0483fd69a845f2",
-          "rows": 565
+          "rows": 565,
+          "fts": { "indexed": 565, "consistent": true }
         },
         "ru": {
           "path": "/srv/bitcal/data/releases/20260809T084800Z/events_ru.db",
           "sha256": "b2bf2c80054f20dd47d633144d62a5edc46e2184884756fa8719325e1b42581a",
-          "rows": 582
+          "rows": 582,
+          "fts": { "indexed": 582, "consistent": true }
         }
       }
     }
     ```
+
+#### Fields
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `ok`, or `degraded` when some artifact's full-text index does not cover every row. |
+| `version` | Baked in at build time. `dev` means it was built without the Makefile. |
+| `path` | Symlink-resolved path of the file this process has open. |
+| `sha256` | Hash of that file, computed once at startup. |
+| `rows` | Rows in `events`. |
+| `fts.indexed` | Documents in the full-text index, read from `events_fts_docsize`. |
+| `fts.consistent` | `fts.indexed == rows` — every event is reachable by `/api/search`. |
+
+#### On the status code
+
+`/health` answers **200 whenever the service is serving**, including when `status` is
+`degraded`. A degraded process is answering every endpoint correctly except for the
+completeness of search, and returning a failure code would have a load balancer pull it for
+no good reason. **Read the `status` field, not the HTTP code.**
+
+The states that would make search useless rather than incomplete — the index missing, empty,
+or unreadable — are not reported here at all, because the service refuses to start on them.
+See *Startup checks* in [Deployment](Deployment.md).
+
 *   **Example:**
     ```bash
     curl "http://localhost:3000/health"
+
+    # In a release check — asserts the service is serving what you published,
+    # and that all of it is searchable.
+    curl -sf localhost:3000/health | jq -e '
+      .status == "ok" and (.databases | to_entries | all(.value.fts.consistent))'
     ```
 
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn) 

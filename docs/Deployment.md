@@ -72,6 +72,24 @@ hashes against the `SHA256SUMS` that shipped with the release.
 
 There is no publish script yet; the steps are manual.
 
+## Startup checks
+
+Before it listens, the service opens each artifact and proves its full-text index works. It
+refuses to start if the index is missing, empty, or unreadable.
+
+That looks heavy-handed for one endpoint, and it is deliberate. A broken FTS index does not
+produce an error — `/api/search` returns an empty result set, which is indistinguishable from
+a query that genuinely matched nothing. The Telegram bot would post nothing and report
+success. Every other endpoint would keep working. Nothing downstream can detect this, so
+startup is the only place where it can be made loud.
+
+An index that is merely *incomplete* is not fatal: the service starts, logs a warning naming
+the counts, and reports `"status": "degraded"` on `/health`. Partial search beats no service.
+
+```
+Full-text index does not cover every row: search will return incomplete results
+```
+
 ## Verifying a deployment
 
 ```sh
@@ -84,12 +102,27 @@ curl -s -H "X-API-KEY: $KEY" 'localhost:3000/api/search?q=bitcoin&lang=en' | jq 
 ```
 
 `/health` is the one that matters: it names the resolved release path and the SHA-256 of each
-file the process actually has open.
+file the process actually has open, and reports whether the whole corpus is searchable.
+
+As a single assertion for a release check:
+
+```sh
+curl -sf localhost:3000/health | jq -e '
+  .status == "ok" and (.databases | to_entries | all(.value.fts.consistent))'
+```
 
 ## Troubleshooting
 
-*   **`no such module: fts5`** — the binary was built without `-tags fts5`. Only `/api/search`
-    and anything else touching `events_fts` will fail; the rest of the API looks fine.
+*   **`no such module: fts5`** — the binary was built without `-tags fts5`. This should be
+    impossible: the build fails without the tag (`fts5_required.go`).
+*   **Exits naming `events_fts`** — the artifact's full-text index is missing, empty or
+    unreadable. The message says which. Do not work around it by removing the check: the
+    symptom in production is search silently returning nothing. Rebuild the artifact and
+    verify with `sqlite3 events_xx.db "INSERT INTO events_fts(events_fts) VALUES('integrity-check')"`
+    before publishing.
+*   **`"status": "degraded"`** — the index covers fewer rows than `events` holds; compare
+    `fts.indexed` against `rows` per language. Search works but misses events. The artifact
+    was published with a partly-built index.
 *   **Exits at startup naming `DB_PATH_EN` or `DB_PATH_RU`** — the variable is unset. There
     are deliberately no defaults.
 *   **`unable to open database file (14)`** — usually a WAL-mode artifact shipped without its
