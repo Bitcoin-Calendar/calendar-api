@@ -4,7 +4,7 @@ go 1.23.0
 
 require (
 	github.com/gofiber/adaptor/v2 v2.2.1
-	github.com/gofiber/fiber/v2 v2.52.9
+	github.com/gofiber/fiber/v2 v2.52.14
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/prometheus/client_golang v1.23.0
 	github.com/rs/zerolog v1.34.0
