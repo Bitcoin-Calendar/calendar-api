@@ -6,11 +6,20 @@ This document provides details for interacting with the Bitcoin Historical Event
 
 ## Base URL
 
-The API is served from the root of the application. If running on a server with IP `213.176.74.147` and port `3001`, the base URL for all API endpoints will be:
+The service binds `127.0.0.1:3000` by default (configurable with `LISTEN_ADDR`), so the base
+URL for all API endpoints is:
 
-`http://213.176.74.147:3001/api`
+`http://localhost:3000/api`
 
-(Replace with `http://localhost:3001/api` if running locally).
+There is no public vhost in front of it yet. Older documentation and the frozen Nostr bot
+refer to a host at `213.176.74.147:3001` — that is a different, older deployment, not this one.
+
+## Read-only
+
+**This API only reads.** It serves a database artifact that is authored, validated and
+published elsewhere, and it opens that artifact read-only. There are no `POST`, `PUT` or
+`DELETE` endpoints, no `/migrate`, and no schema management at startup — earlier versions had
+all of these and they have been removed. `Access-Control-Allow-Methods` is `GET,HEAD,OPTIONS`.
 
 ## Authentication
 
@@ -33,8 +42,42 @@ The API provides the following main functionalities:
 *   **`/search`**: Perform a full-text search across event titles, descriptions, and tags.
 *   **`/tags`**: Get a list of all unique event tags and their usage counts.
 *   **`/events/tags/:tag`**: Retrieve a paginated list of events associated with a specific tag.
+*   **`/health`**: Report which database artifact the service has open. **Not** under `/api`, and needs no API key.
 
 Detailed information for each endpoint is provided below.
+
+## The event object
+
+Every endpoint that returns events returns objects of this shape. Four points are worth
+reading before writing a client, because all four have changed:
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | integer | **Independent per language.** RU `100` and EN `100` are unrelated events. Do not use it as a cross-language key — use `url_path`. |
+| `date` | string | `YYYY-MM-DD`, e.g. `"1881-09-29"`. **Not** an RFC 3339 timestamp; earlier versions emitted `"1881-09-29T00:00:00Z"`, inventing a time and a timezone the data never had. The range starts in 1881, before the Unix epoch — parse accordingly. |
+| `title` | string | |
+| `description` | string | |
+| `tags` | string | A **JSON array encoded as a string**, e.g. `"[\"bitcoin\",\"whitepaper\"]"`. Parse it; it is not a list. |
+| `media` | string \| null | A JSON array encoded as a string, or `null` when the event has no media. Never `""` and never `"[]"` — absence is exactly one value. |
+| `references` | string \| null | Same encoding and same null rule as `media`. |
+| `url_path` | string | `/<date>/<slug>/`, e.g. `"/2013-08-09/hal-finneys-last-post/"`. The site's page path and the cross-language join key. **Note the leading slash** — joining it onto a base URL with another `/` yields a double slash. |
+| `created_at` | string \| null | RFC 3339, or `null`. Bookkeeping about the row, not about the event; most rows have no value. |
+| `updated_at` | string \| null | Same. |
+
+```json
+{
+  "id": 267,
+  "date": "2013-08-09",
+  "title": "✍️ Последний пост Хэла Финни",
+  "description": "9 августа 2013 года Хэл Финни опубликовал свой последний пост на bitcointalk.",
+  "tags": "[\"archives\", \"bitcoin\", \"bitcointalk\", \"cypherpunks\", \"finney\"]",
+  "media": "[\"https://i.nostr.build/dwoR3.png\"]",
+  "references": "[\"https://web.archive.org/web/20240207194838/https://bitcointalk.org/...\"]",
+  "url_path": "/2013-08-09/hal-finneys-last-post/",
+  "created_at": null,
+  "updated_at": null
+}
+```
 
 ## Available Tags for Querying
 
@@ -62,12 +105,15 @@ The following tags can be used with the `/events/tags/:tag` endpoint to find rel
 
 ## Language Support
 
-Most data-retrieving endpoints support a `lang` query parameter to specify the language of the events to be queried. This feature is confirmed to be working.
+All data-retrieving endpoints support a `lang` query parameter to specify the language of the events to be queried.
 
-*   `lang=en` (Default): Retrieves events from the English database (`events.db`).
-*   `lang=ru`: Retrieves events from the Russian database (`events_ru.db`).
+*   `lang=en` (Default): Retrieves events from the English database (`events_en.db`, `DB_PATH_EN`).
+*   `lang=ru`: Retrieves events from the Russian database (`events_ru.db`, `DB_PATH_RU`).
 
 If the `lang` parameter is omitted or an unsupported value is provided, it defaults to `en`.
+
+The two databases are **separate files with independent `id` sequences**, and they are not
+guaranteed to hold the same events. Use `url_path` to relate an event across languages.
 
 ## Error Responses
 
@@ -107,17 +153,18 @@ Error responses will typically be in JSON format, like:
     *   **Body:**
         ```json
         {
-          "events": [ // Note: Changed from "data" to "events"
+          "events": [
             {
               "id": 1,
-              "date": "2008-11-01T00:00:00Z",
+              "date": "2008-11-01",
               "title": "📜 Bitcoin Whitepaper Published",
               "description": "Satoshi Nakamoto publishes the Bitcoin whitepaper...",
-              "tags": "["bitcoin","whitepaper","satoshi"]",
-              "media": "https://bitcoin.org/img/icons/opengraph.png",
-              "references": "["https://bitcoin.org/bitcoin.pdf"]",
-              "created_at": "2025-05-26T17:00:00Z", // Example timestamp
-              "updated_at": "2025-05-26T17:00:00Z"  // Example timestamp
+              "tags": "[\"bitcoin\",\"whitepaper\",\"satoshi\"]",
+              "media": null,
+              "references": "[\"https://bitcoin.org/bitcoin.pdf\"]",
+              "url_path": "/2008-11-01/bitcoin-whitepaper-published/",
+              "created_at": null,
+              "updated_at": null
             }
             // ... more events
           ],
@@ -132,22 +179,22 @@ Error responses will typically be in JSON format, like:
 *   **Example:**
     ```bash
     # Get first 5 English events
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events?page=1&limit=5&lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?page=1&limit=5&lang=en"
 
     # Get Russian events for December 2023
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events?year=2023&month=12&lang=ru"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?year=2023&month=12&lang=ru"
 
     # Get English events for the 15th of any month/year
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events?day=15&lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?day=15&lang=en"
 
     # Get English events for any day in May of any year
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events?month=05&lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?month=05&lang=en"
     
     # Get English events for the year 2021
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events?year=2021&lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?year=2021&lang=en"
 
     # Get Russian events for May 27th, 2020
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events?year=2020&month=05&day=27&lang=ru"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?year=2020&month=05&day=27&lang=ru"
     ```
 
 ### 2. Search Events (FTS5)
@@ -157,6 +204,12 @@ Error responses will typically be in JSON format, like:
 *   **Description:** Performs a full-text search across the `title`, `description`, and `tags` fields of events using SQLite's FTS5 extension. Results are sorted by relevance. Supports language selection and pagination.
 *   **Query Parameters:**
     *   `q` (required, string): The search query. The query can use FTS5's syntax (e.g., `bitcoin AND halving`, `"satoshi nakamoto"`).
+
+    **Tokenizer caveat.** Both languages use FTS5's default `unicode61` tokenizer. It
+    case-folds Cyrillic correctly but does **not** stem Russian, so `биткоина` and `биткоин`
+    are different tokens and return different result sets (110 vs 246 hits, overlapping in
+    only 45 rows). For Russian queries, prefer a prefix match — `биткоин*` returns 361.
+
     *   `page` (optional, integer): The page number to retrieve. Defaults to `1`.
     *   `limit` (optional, integer): The number of events per page. Defaults to `20`.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
@@ -185,10 +238,10 @@ Error responses will typically be in JSON format, like:
 *   **Example:**
     ```bash
     # Search for English events containing "Satoshi"
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/search?q=Satoshi&lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/search?q=Satoshi&lang=en"
 
     # Search for Russian events about "whitepaper", limit to 5 results
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/search?q=whitepaper&limit=5&lang=ru"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/search?q=whitepaper&limit=5&lang=ru"
     ```
 
 ### 3. Get Single Event by ID
@@ -206,16 +259,17 @@ Error responses will typically be in JSON format, like:
     *   **Body:**
         ```json
         {
-          "data": { // Note: This endpoint's response structure was not specified as changed in the original issue, keeping "data" wrapper for now.
+          "data": { // Note: this endpoint wraps in "data"; the list endpoints use "events".
             "id": 1,
-            "date": "2008-11-01T00:00:00Z",
+            "date": "2008-11-01",
             "title": "📜 Bitcoin Whitepaper Published",
             "description": "Satoshi Nakamoto publishes the Bitcoin whitepaper...",
-            "tags": "["bitcoin","whitepaper","satoshi"]",
-            "media": "https://bitcoin.org/img/icons/opengraph.png",
-            "references": "["https://bitcoin.org/bitcoin.pdf"]",
-            "created_at": "2025-05-26T17:00:00Z",
-            "updated_at": "2025-05-26T17:00:00Z"
+            "tags": "[\"bitcoin\",\"whitepaper\",\"satoshi\"]",
+            "media": null,
+            "references": "[\"https://bitcoin.org/bitcoin.pdf\"]",
+            "url_path": "/2008-11-01/bitcoin-whitepaper-published/",
+            "created_at": null,
+            "updated_at": null
           }
         }
         ```
@@ -231,10 +285,10 @@ Error responses will typically be in JSON format, like:
 *   **Example:**
     ```bash
     # Get English event with ID 1
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events/1?lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/1?lang=en"
 
     # Get Russian event with ID 20 (ID for the May 27th event in Russian DB)
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events/20?lang=ru"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/20?lang=ru"
     ```
 
 ### 4. Get All Unique Tags
@@ -266,10 +320,10 @@ Error responses will typically be in JSON format, like:
 *   **Example:**
     ```bash
     # Get English tags
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/tags?lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/tags?lang=en"
 
     # Get Russian tags
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/tags?lang=ru"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/tags?lang=ru"
     ```
 
 ### 5. Get Events by Tag (Paginated)
@@ -289,17 +343,18 @@ Error responses will typically be in JSON format, like:
     *   **Body (follows the same structure as Get All Events `/events`):**
         ```json
         {
-          "events": [ // Note: Changed from "data" to "events"
+          "events": [
             {
               "id": 10,
-              "date": "2010-05-22T00:00:00Z",
+              "date": "2010-05-22",
               "title": "🍕 Bitcoin Pizza Day",
               "description": "Laszlo Hanyecz made the first purchase...",
-              "tags": "["first","adoption","bitcointalk"]",
-              "media": "https://example.com/pizza.webp",
-              "references": "["https://bitcointalk.org/..."]",
-              "created_at": "2025-05-26T17:00:00Z",
-              "updated_at": "2025-05-26T17:00:00Z"
+              "tags": "[\"first\",\"adoption\",\"bitcointalk\"]",
+              "media": "[\"https://example.com/pizza.webp\"]",
+              "references": "[\"https://bitcointalk.org/...\"]",
+              "url_path": "/2010-05-22/bitcoin-pizza-day/",
+              "created_at": "2026-08-08T09:59:56Z",
+              "updated_at": "2026-08-08T09:59:56Z"
             }
             // ... more events with the specified tag
           ],
@@ -319,10 +374,45 @@ Error responses will typically be in JSON format, like:
 *   **Example:**
     ```bash
     # Get first 2 English events tagged with 'adoption'
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events/tags/adoption?limit=2&lang=en"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/tags/adoption?limit=2&lang=en"
 
     # Get first 2 Russian events tagged with 'adoption'
-    curl -H "X-API-KEY: your_api_key" "http://213.176.74.147:3001/api/events/tags/adoption?limit=2&lang=ru"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/tags/adoption?limit=2&lang=ru"
+    ```
+
+### 6. Health
+
+*   **Endpoint:** `/health` — note this is at the root, **not** under `/api`
+*   **Method:** `GET`
+*   **Authentication:** none
+*   **Description:** Reports which database artifact each language is actually being served
+    from. `path` is symlink-resolved, so it names the release directory rather than
+    `current`, and `sha256` is computed **once at startup** — it therefore describes the file
+    the process has open, not whatever `current` points at when you ask. Those two differing
+    is the failure this endpoint exists to catch. After publishing a release, compare these
+    hashes against the `SHA256SUMS` that shipped with it.
+*   **Success Response (200 OK):**
+    ```json
+    {
+      "status": "ok",
+      "version": "0.1.0-abc1234",
+      "databases": {
+        "en": {
+          "path": "/srv/bitcal/data/releases/20260809T084800Z/events_en.db",
+          "sha256": "cb95ad42a181aff3f2cf0579ee3f0d647b81db38c8f3228e1d0483fd69a845f2",
+          "rows": 565
+        },
+        "ru": {
+          "path": "/srv/bitcal/data/releases/20260809T084800Z/events_ru.db",
+          "sha256": "b2bf2c80054f20dd47d633144d62a5edc46e2184884756fa8719325e1b42581a",
+          "rows": 582
+        }
+      }
+    }
+    ```
+*   **Example:**
+    ```bash
+    curl "http://localhost:3000/health"
     ```
 
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn) 
