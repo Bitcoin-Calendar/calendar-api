@@ -22,101 +22,27 @@ type Event struct {
 	Rank        float64   `json:"-" gorm:"-"` // Omit from JSON and DB schema
 }
 
-// InitDB initializes the database connection and migrates the schema.
-// It now returns the DB instance or an error.
+// InitDB opens a database read-only. It performs no schema management of any
+// kind: the artifact ships with its own indexes, FTS tables and triggers, and
+// recreating them is the failure mode this service is built to prevent. The
+// deployed artifact is mode 0444 in a directory the service user cannot write,
+// so any DDL here would also be a hard boot failure.
+//
+// Every part of the DSN matters:
+//   - the "file:" prefix is not optional. Without it, mode=ro is silently
+//     ignored, and against a writable file the connection will happily create
+//     tables.
+//   - mode=ro and _query_only=1 block writes at the connection level, so a
+//     mistake fails loudly rather than mutating the artifact.
+//   - there is deliberately no _journal_mode: switching to WAL is itself a
+//     write, and no _synchronous, which only governs fsync on write.
 func InitDB(dbPath string) (*gorm.DB, error) {
-	var err error
-	var localDB *gorm.DB // Use a local variable for the DB instance
-	localDB, err = gorm.Open(sqlite.Open(dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_cache_size=10000"), &gorm.Config{
+	localDB, err := gorm.Open(sqlite.Open("file:"+dbPath+"?mode=ro&_query_only=1&_cache_size=10000"), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent), // Or logger.Info for more logs
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Migrate the schema
-	err = localDB.AutoMigrate(&Event{})
-	if err != nil {
-		return nil, err
-	}
-
-	// Create FTS5 virtual table
-	if err := localDB.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-			title,
-			description,
-			tags,
-			content='events',
-			content_rowid='id'
-		);
-	`).Error; err != nil {
-		return nil, err
-	}
-
-	// Triggers to keep FTS table synchronized with events table
-	if err := localDB.Exec(`
-		CREATE TRIGGER IF NOT EXISTS events_after_insert
-		AFTER INSERT ON events
-		BEGIN
-			INSERT INTO events_fts(rowid, title, description, tags)
-			VALUES (new.id, new.title, new.description, new.tags);
-		END;
-	`).Error; err != nil {
-		return nil, err
-	}
-
-	if err := localDB.Exec(`
-		CREATE TRIGGER IF NOT EXISTS events_after_delete
-		AFTER DELETE ON events
-		BEGIN
-			INSERT INTO events_fts(events_fts, rowid, title, description, tags)
-			VALUES ('delete', old.id, old.title, old.description, old.tags);
-		END;
-	`).Error; err != nil {
-		return nil, err
-	}
-
-	if err := localDB.Exec(`
-		CREATE TRIGGER IF NOT EXISTS events_after_update
-		AFTER UPDATE ON events
-		BEGIN
-			INSERT INTO events_fts(events_fts, rowid, title, description, tags)
-			VALUES ('delete', old.id, old.title, old.description, old.tags);
-			INSERT INTO events_fts(rowid, title, description, tags)
-			VALUES (new.id, new.title, new.description, new.tags);
-		END;
-	`).Error; err != nil {
-		return nil, err
-	}
-
-	// Initial population of FTS table
-	var count int64
-	localDB.Model(&Event{}).Count(&count)
-	var ftsCount int64
-	localDB.Table("events_fts").Count(&ftsCount)
-
-	if count > 0 && ftsCount == 0 {
-		if err := localDB.Exec(`
-			INSERT INTO events_fts(rowid, title, description, tags)
-			SELECT id, title, description, tags FROM events;
-		`).Error; err != nil {
-			return nil, err
-		}
-	}
-
-	// Create indexes
-	if !localDB.Migrator().HasIndex(&Event{}, "idx_events_date") {
-		err = localDB.Exec("CREATE INDEX IF NOT EXISTS idx_events_date ON events(date)").Error
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !localDB.Migrator().HasIndex(&Event{}, "idx_events_tags") { // Uncommenting Tags index
-		err = localDB.Exec("CREATE INDEX IF NOT EXISTS idx_events_tags ON events(tags)").Error
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return localDB, nil // Return the initialized DB instance
+	return localDB, nil
 }
