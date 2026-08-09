@@ -61,6 +61,10 @@ func TestInitDBOnReadOnlyArtifact(t *testing.T) {
 	if event.Media != nil {
 		t.Fatalf("absent media: want nil, got %q", *event.Media)
 	}
+	// A NULL timestamp must render as null, not as the year-1 zero time.
+	if event.CreatedAt != nil {
+		t.Fatalf("absent created_at: want nil, got %v", *event.CreatedAt)
+	}
 
 	// No sidecars may have appeared: the directory is not writable, so their
 	// presence would mean the open was not read-only.
