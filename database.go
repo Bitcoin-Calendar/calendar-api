@@ -18,7 +18,16 @@ import (
 // timestamp into a time.Time inside the driver, before GORM sees the value —
 // so declaring the field as a plain string is not enough on its own, and the
 // API goes on emitting "1881-09-29T00:00:00Z". Scanning back down to the date
-// component is what actually fixes the contract.
+// component is what actually fixes the contract. There is no DSN or config
+// switch for the driver's behaviour — it is an unconditional switch on the
+// declared type — so the alternatives are this or redeclaring the column TEXT,
+// which needs a full SQLite table rebuild of the canonical artifact.
+//
+// One inherited caveat: when the driver cannot parse the stored text it
+// returns the zero time silently rather than an error, which would surface
+// here as "0001-01-01". That is covered upstream — validate.py invariant 1
+// checks every row's date against YYYY-MM-DD, and the publisher runs the
+// validator against the staged copy before the symlink flip.
 type DateString string
 
 // Scan implements sql.Scanner.
@@ -57,6 +66,13 @@ func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 //
 // URLPath is /<date>/<slug>/, the cross-language join key and the website's
 // page URL. The Telegram bot already reads it.
+//
+// CreatedAt and UpdatedAt are pointers for the same reason as Media: they are
+// genuinely absent on many rows (505 of 582 RU created_at, 265 of 565 EN), and
+// a plain time.Time renders those as "0001-01-01T00:00:00Z" — an invented
+// timestamp of exactly the kind Date was changed to stop emitting. Their
+// declared `datetime` type is correct, though, so unlike Date they need no
+// scanner: where a value exists it really is a timestamp.
 type Event struct {
 	ID          uint       `json:"id" gorm:"primaryKey"`
 	Date        DateString `json:"date" gorm:"type:date;not null"`
@@ -66,8 +82,8 @@ type Event struct {
 	Media       *string    `json:"media" gorm:"type:text"`      // JSON array as string, e.g. ["url1","url2"]; NULL when absent
 	References  *string    `json:"references" gorm:"type:text"` // JSON array as string; NULL when absent
 	URLPath     string     `json:"url_path" gorm:"column:url_path"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	CreatedAt   *time.Time `json:"created_at"` // NULL on many rows; renders as null
+	UpdatedAt   *time.Time `json:"updated_at"` // NULL on many rows; renders as null
 }
 
 // InitDB opens a database read-only. It performs no schema management of any
