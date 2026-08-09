@@ -248,7 +248,7 @@ func createEventHandler(c *fiber.Ctx) error {
 	}
 
 	// Basic validation
-	if event.Title == "" || event.Date.IsZero() {
+	if event.Title == "" || event.Date == "" {
 		zlog.Warn().Str("lang", lang).Msg("createEventHandler: Title and Date are required fields")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Title and Date are required fields"})
 	}

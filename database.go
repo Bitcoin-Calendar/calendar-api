@@ -8,18 +8,32 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// Event matches the schema defined in Calendar API Spec.md
+// Event matches the schema of the canonical database artifact:
+//
+//	events(id, date, title, description, media, tags, "references",
+//	       created_at, updated_at, url_path)
+//
+// Date is TEXT in YYYY-MM-DD form and the range starts at 1881-09-29 — before
+// the Unix epoch. It is a string here so the API emits "1881-09-29" rather than
+// the invented time and timezone of "1881-09-29T00:00:00Z".
+//
+// Media and References are pointers so that an absent value renders as JSON
+// null. Canonical stores NULL and only NULL for these — never "" and never
+// "[]" — and "" would claim "an empty media list" rather than "no media".
+//
+// URLPath is /<date>/<slug>/, the cross-language join key and the website's
+// page URL. The Telegram bot already reads it.
 type Event struct {
 	ID          uint      `json:"id" gorm:"primaryKey"`
-	Date        time.Time `json:"date" gorm:"type:date;not null"`
+	Date        string    `json:"date" gorm:"type:date;not null"`
 	Title       string    `json:"title" gorm:"size:255;not null"`
 	Description string    `json:"description" gorm:"type:text"`
 	Tags        string    `json:"tags" gorm:"size:500"`        // JSON array as string
-	Media       string    `json:"media" gorm:"type:text"`      // Link to media file(s), stored as a JSON array string e.g., ["url1", "url2"]
-	References  string    `json:"references" gorm:"type:text"` // JSON array as string
+	Media       *string   `json:"media" gorm:"type:text"`      // JSON array as string, e.g. ["url1","url2"]; NULL when absent
+	References  *string   `json:"references" gorm:"type:text"` // JSON array as string; NULL when absent
+	URLPath     string    `json:"url_path" gorm:"column:url_path"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	Rank        float64   `json:"-" gorm:"-"` // Omit from JSON and DB schema
 }
 
 // InitDB opens a database read-only. It performs no schema management of any
