@@ -14,15 +14,7 @@ import (
 // directory. Anything issuing DDL or negotiating WAL at startup dies here.
 // TestMain has already proved the boot; this checks it is actually serving.
 func TestServesReadOnlyArtifact(t *testing.T) {
-	var health struct {
-		Status    string `json:"status"`
-		Version   string `json:"version"`
-		Databases map[string]struct {
-			Path   string `json:"path"`
-			SHA256 string `json:"sha256"`
-			Rows   int64  `json:"rows"`
-		} `json:"databases"`
-	}
+	var health healthDoc
 	if code := request(t, http.MethodGet, "/health", false, &health); code != http.StatusOK {
 		t.Fatalf("/health: want 200 without an API key, got %d", code)
 	}
@@ -41,6 +33,15 @@ func TestServesReadOnlyArtifact(t *testing.T) {
 		}
 		if db.Rows == 0 {
 			t.Errorf("%s: reports 0 rows", lang)
+		}
+		// The release check reads these: they are what turns "the service is
+		// up" into "the service is serving the artifact I just published, and
+		// all of it is searchable".
+		if db.FTS.Indexed != db.Rows {
+			t.Errorf("%s fts.indexed: want %d to match rows, got %d", lang, db.Rows, db.FTS.Indexed)
+		}
+		if !db.FTS.Consistent {
+			t.Errorf("%s fts.consistent: want true", lang)
 		}
 	}
 	if health.Databases["ru"].Rows != 4 || health.Databases["en"].Rows != 3 {

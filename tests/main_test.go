@@ -27,6 +27,7 @@ var (
 	baseURL     string
 	artifactDir string
 	fixtureSums map[string]string // filename -> sha256 at publish time
+	binaryPath  string            // built once by run(); reused to boot extra instances
 )
 
 // TestMain stages an artifact the way a release does, starts the real binary
@@ -53,6 +54,7 @@ func run(m *testing.M) (int, error) {
 	}()
 
 	binary := filepath.Join(workDir, "bitcal-api")
+	binaryPath = binary
 	build := exec.Command("go", "build", "-tags", "fts5", "-o", binary, ".")
 	build.Dir = ".."
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
@@ -123,7 +125,7 @@ func run(m *testing.M) (int, error) {
 		<-exited
 	}()
 
-	if err := waitForHealth(exited, &exitErr, 30*time.Second); err != nil {
+	if err := waitForHealth(baseURL, exited, &exitErr, 30*time.Second); err != nil {
 		out, _ := os.ReadFile(filepath.Join(workDir, "server.log"))
 		return 0, fmt.Errorf("%w\n--- server log ---\n%s", err, out)
 	}
@@ -268,7 +270,7 @@ func freePort() (int, error) {
 // waitForHealth blocks until the service answers /health, and distinguishes the
 // three ways that can fail. Each has a different cause and a different fix, so
 // collapsing them into one timeout message wastes the reader's time.
-func waitForHealth(exited <-chan struct{}, exitErr *error, within time.Duration) error {
+func waitForHealth(base string, exited <-chan struct{}, exitErr *error, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	var last error
 
@@ -280,7 +282,7 @@ func waitForHealth(exited <-chan struct{}, exitErr *error, within time.Duration)
 		default:
 		}
 
-		res, err := http.Get(baseURL + "/health")
+		res, err := http.Get(base + "/health")
 		if err == nil {
 			res.Body.Close()
 			switch res.StatusCode {
