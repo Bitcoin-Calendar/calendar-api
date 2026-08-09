@@ -132,6 +132,14 @@ func getTagsHandler(c *fiber.Ctx) error {
 	// Note: Fallback for comma-separated tags is removed with this SQL-native approach.
 	// If tags are not valid JSON arrays, or if individual tags within the array are empty/whitespace-only,
 	// they will be ignored by this query.
+	// NOTHING MAY FOLLOW THE FINAL SEMICOLON — not even a comment. SQLite
+	// prepares the text after it as a further statement, and a comment-only
+	// statement prepares successfully to a NULL handle. go-sqlite3 then steps
+	// that NULL handle, gets neither DONE nor ROW, and returns nil instead of
+	// io.EOF (sqlite3.go:2238), so database/sql calls Next forever. The
+	// handler hangs, holding the connection, with no error and no timeout.
+	// This endpoint hung for exactly that reason. Comments anywhere before the
+	// final semicolon are fine.
 	sqlQuery := `
 SELECT
     LOWER(j.value) AS tag,
@@ -149,9 +157,9 @@ WHERE
     AND TRIM(CAST(j.value AS TEXT)) != '' -- Ensures the extracted tag is not an empty or whitespace-only string
 GROUP BY
     LOWER(j.value) -- Group by the lowercased tag for case-insensitive counting
+-- Order alphabetically by the (now lowercased) tag
 ORDER BY
-    tag ASC; -- Order alphabetically by the (now lowercased) tag
-`
+    tag ASC;`
 	if err := db.Raw(sqlQuery).Scan(&result).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getTagsHandler: Error executing raw SQL for tags")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
