@@ -45,6 +45,23 @@ func TestInitDBOnReadOnlyArtifact(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", rows)
 	}
 
+	// date must survive as a plain YYYY-MM-DD string, including before the
+	// Unix epoch. The driver converts the column to a time.Time on the way
+	// out, so without DateString.Scan this reads 1881-09-29T00:00:00Z.
+	var event Event
+	if err := db.First(&event, 1).Error; err != nil {
+		t.Fatalf("read fixture row: %v", err)
+	}
+	if event.Date != "1881-09-29" {
+		t.Fatalf("date: want %q, got %q", "1881-09-29", event.Date)
+	}
+	if event.URLPath != "/1881-09-29/fixture/" {
+		t.Fatalf("url_path: want %q, got %q", "/1881-09-29/fixture/", event.URLPath)
+	}
+	if event.Media != nil {
+		t.Fatalf("absent media: want nil, got %q", *event.Media)
+	}
+
 	// No sidecars may have appeared: the directory is not writable, so their
 	// presence would mean the open was not read-only.
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
@@ -69,7 +86,10 @@ func seedFixture(t *testing.T, dbPath string) {
 	stmts := []string{
 		`CREATE TABLE events (
 			id INTEGER PRIMARY KEY,
-			date TEXT NOT NULL,
+			-- Declared 'date', exactly as the artifact does. The declared type
+			-- is what makes go-sqlite3 hand back a time.Time, so a TEXT column
+			-- here would quietly fail to reproduce the real behaviour.
+			date date NOT NULL,
 			title TEXT NOT NULL,
 			description TEXT,
 			media TEXT,

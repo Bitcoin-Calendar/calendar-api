@@ -1,12 +1,46 @@
 package main
 
 import (
+	"database/sql/driver"
+	"fmt"
 	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+// DateString is the events.date column: YYYY-MM-DD text, from 1881-09-29
+// onward. Its JSON form is a plain string.
+//
+// The scanner is not optional. The column's *declared* type in the artifact is
+// `date`, and mattn/go-sqlite3 converts any column declared date/datetime/
+// timestamp into a time.Time inside the driver, before GORM sees the value —
+// so declaring the field as a plain string is not enough on its own, and the
+// API goes on emitting "1881-09-29T00:00:00Z". Scanning back down to the date
+// component is what actually fixes the contract.
+type DateString string
+
+// Scan implements sql.Scanner.
+func (d *DateString) Scan(value interface{}) error {
+	switch v := value.(type) {
+	case nil:
+		*d = ""
+	case time.Time:
+		*d = DateString(v.Format("2006-01-02"))
+	case string:
+		*d = DateString(v)
+	case []byte:
+		*d = DateString(v)
+	default:
+		return fmt.Errorf("events.date: cannot scan %T into DateString", value)
+	}
+	return nil
+}
+
+// Value implements driver.Valuer. This service never writes, but GORM expects
+// the pair.
+func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 
 // Event matches the schema of the canonical database artifact:
 //
@@ -24,16 +58,16 @@ import (
 // URLPath is /<date>/<slug>/, the cross-language join key and the website's
 // page URL. The Telegram bot already reads it.
 type Event struct {
-	ID          uint      `json:"id" gorm:"primaryKey"`
-	Date        string    `json:"date" gorm:"type:date;not null"`
-	Title       string    `json:"title" gorm:"size:255;not null"`
-	Description string    `json:"description" gorm:"type:text"`
-	Tags        string    `json:"tags" gorm:"size:500"`        // JSON array as string
-	Media       *string   `json:"media" gorm:"type:text"`      // JSON array as string, e.g. ["url1","url2"]; NULL when absent
-	References  *string   `json:"references" gorm:"type:text"` // JSON array as string; NULL when absent
-	URLPath     string    `json:"url_path" gorm:"column:url_path"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          uint       `json:"id" gorm:"primaryKey"`
+	Date        DateString `json:"date" gorm:"type:date;not null"`
+	Title       string     `json:"title" gorm:"size:255;not null"`
+	Description string     `json:"description" gorm:"type:text"`
+	Tags        string     `json:"tags" gorm:"size:500"`        // JSON array as string
+	Media       *string    `json:"media" gorm:"type:text"`      // JSON array as string, e.g. ["url1","url2"]; NULL when absent
+	References  *string    `json:"references" gorm:"type:text"` // JSON array as string; NULL when absent
+	URLPath     string     `json:"url_path" gorm:"column:url_path"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // InitDB opens a database read-only. It performs no schema management of any
