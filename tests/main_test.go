@@ -110,14 +110,22 @@ func run(m *testing.M) (int, error) {
 	if err := srv.Start(); err != nil {
 		return 0, err
 	}
+	// If the service exits — which is what a read-only violation looks like —
+	// say so at once instead of polling a dead port for half a minute and then
+	// reporting the wrong thing. The channel is closed rather than sent on, so
+	// that both the startup check and the cleanup below can observe it; a
+	// single send would let whichever ran first starve the other.
+	var exitErr error
+	exited := make(chan struct{})
+	go func() { exitErr = srv.Wait(); close(exited) }()
 	defer func() {
 		_ = srv.Process.Kill()
-		_, _ = srv.Process.Wait()
+		<-exited
 	}()
 
-	if err := waitForHealth(30 * time.Second); err != nil {
+	if err := waitForHealth(exited, &exitErr, 30*time.Second); err != nil {
 		out, _ := os.ReadFile(filepath.Join(workDir, "server.log"))
-		return 0, fmt.Errorf("service did not come up: %w\n--- server log ---\n%s", err, out)
+		return 0, fmt.Errorf("%w\n--- server log ---\n%s", err, out)
 	}
 
 	return m.Run(), nil
@@ -211,7 +219,11 @@ func fixtureRows(lang string) []fixtureRow {
 			Description: "Born before the Unix epoch, which is the point of this row.",
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
-			Tags: `["holiday", "prebitcoin"]`, URLPath: "/1881-09-29/birthday-of-ludwig-von-mises/",
+			// `price` is exactly five characters on purpose: it is what makes
+			// the LIKE-wildcard probe in TestTagFilterIgnoresLikeWildcards bite.
+			// Without a five-letter tag here, `_____` matches nothing whether or
+			// not the bug is present, and the test passes vacuously.
+			Tags: `["holiday", "prebitcoin", "price"]`, URLPath: "/1881-09-29/birthday-of-ludwig-von-mises/",
 		},
 		{
 			ID: 2, Date: "2008-11-01",
@@ -253,23 +265,41 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-func waitForHealth(within time.Duration) error {
+// waitForHealth blocks until the service answers /health, and distinguishes the
+// three ways that can fail. Each has a different cause and a different fix, so
+// collapsing them into one timeout message wastes the reader's time.
+func waitForHealth(exited <-chan struct{}, exitErr *error, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	var last error
+
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			return fmt.Errorf("the service exited during startup (%v) — read the "+
+				"log below; a read-only violation looks exactly like this", *exitErr)
+		default:
+		}
+
 		res, err := http.Get(baseURL + "/health")
 		if err == nil {
 			res.Body.Close()
-			if res.StatusCode == http.StatusOK {
+			switch res.StatusCode {
+			case http.StatusOK:
 				return nil
+			case http.StatusUnauthorized, http.StatusForbidden:
+				return fmt.Errorf("/health answered %d: it must be registered "+
+					"outside the /api group and require no API key — a deploy "+
+					"check that needs a secret is a deploy check that gets skipped",
+					res.StatusCode)
+			default:
+				last = fmt.Errorf("/health returned %d", res.StatusCode)
 			}
-			last = fmt.Errorf("/health returned %d", res.StatusCode)
 		} else {
 			last = err
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return last
+	return fmt.Errorf("the service never answered /health within %s: %w", within, last)
 }
 
 func sha256File(path string) (string, error) {

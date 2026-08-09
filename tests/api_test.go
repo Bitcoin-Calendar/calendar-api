@@ -237,15 +237,43 @@ func TestTagCountsEventsNotOccurrences(t *testing.T) {
 // TestTagFilterIgnoresLikeWildcards guards a defect that answered a question
 // nobody asked: the tag went into a LIKE pattern, so /api/events/tags/%
 // returned every event and /api/events/tags/_____ every five-letter tag.
+//
+// Each probe is paired with the literal tag it would match under LIKE, and the
+// literal is asserted to match something. Without that pairing the test passes
+// whenever the probe matches nothing for any reason at all — which is exactly
+// how an earlier version of it passed while the bug was present: no fixture tag
+// was five characters long, and Fiber does not percent-decode a route
+// parameter, so neither `_____` nor `%25` could match even under LIKE.
 func TestTagFilterIgnoresLikeWildcards(t *testing.T) {
-	for _, tag := range []string{"%25", "_____", "%25bitcoin%25"} {
+	total := func(tag string) int {
+		t.Helper()
 		var list eventList
 		if code := get(t, "/api/events/tags/"+tag+"?lang=ru&limit=1", &list); code != http.StatusOK {
 			t.Fatalf("tag %q: want 200, got %d", tag, code)
 		}
-		if list.Pagination.Total != 0 {
+		return list.Pagination.Total
+	}
+
+	// Both probes reach the handler as written. A percent-encoded `%` is
+	// deliberately not among them: Fiber hands the route parameter over still
+	// encoded, so `%25` arrives as the literal three characters and can never
+	// match anything, bug or no bug. An assertion that cannot fail is worse
+	// than no assertion, because it reads like coverage.
+	probes := []struct{ wildcard, literal string }{
+		{"bitcoi_", "bitcoin"}, // _ matches exactly one character
+		{"_____", "price"},     // five characters, and `price` is five long
+	}
+
+	for _, p := range probes {
+		// The control: if the literal matches nothing then the probe proves
+		// nothing either, and the test would be measuring its own fixture.
+		if n := total(p.literal); n == 0 {
+			t.Fatalf("control tag %q matches no events; the %q probe would pass vacuously",
+				p.literal, p.wildcard)
+		}
+		if n := total(p.wildcard); n != 0 {
 			t.Errorf("tag %q matched %d events; LIKE wildcards are being honoured",
-				tag, list.Pagination.Total)
+				p.wildcard, n)
 		}
 	}
 }
@@ -267,18 +295,30 @@ func TestTagFilterIsCaseInsensitive(t *testing.T) {
 }
 
 // TestNoWriteEndpoints holds the line the whole rework is about.
+//
+// The expected code is asserted exactly, not merely "not a success". A
+// re-added handler called with an empty body answers 400, so a test that only
+// rejected 2xx would let the write half back in without a word. 405 means the
+// path exists for other methods and this one is not routed; 404 means no such
+// path at all.
 func TestNoWriteEndpoints(t *testing.T) {
-	cases := []struct{ method, path string }{
-		{http.MethodPost, "/api/events"},
-		{http.MethodPut, "/api/events/1"},
-		{http.MethodDelete, "/api/events/1"},
-		{http.MethodPost, "/api/events/batch"},
-		{http.MethodPost, "/api/migrate"},
+	cases := []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodPost, "/api/events", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/api/events/1", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/events/1", http.StatusMethodNotAllowed},
+		// 405 rather than 404: /api/events/:id makes `batch` a valid path for
+		// GET, so the router reports the method as unrouted, not the path as
+		// missing.
+		{http.MethodPost, "/api/events/batch", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/api/migrate", http.StatusNotFound},
 	}
 	for _, c := range cases {
-		code := request(t, c.method, c.path, true, nil)
-		if code == http.StatusOK || code == http.StatusCreated || code == http.StatusNoContent {
-			t.Errorf("%s %s: answered %d — a write endpoint is still registered", c.method, c.path, code)
+		if code := request(t, c.method, c.path, true, nil); code != c.want {
+			t.Errorf("%s %s: want %d, got %d — a write endpoint may be registered again",
+				c.method, c.path, c.want, code)
 		}
 	}
 }
