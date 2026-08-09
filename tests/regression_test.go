@@ -52,6 +52,108 @@ func TestNoCommentAfterFinalSemicolon(t *testing.T) {
 	}
 }
 
+// goSort matches the argument of a GORM .Order(...) call.
+var goSort = regexp.MustCompile(`\.Order\(([^)]+)\)`)
+
+// packageConst matches a package-level string constant, declared on its own or
+// inside a const block, so a sort named by identifier — .Order(eventOrder) —
+// can be resolved to the text it stands for.
+var packageConst = regexp.MustCompile(`(?m)^\s*(?:const\s+)?(\w+)\s*=\s*"([^"]*)"`)
+
+// rawString matches a backtick-quoted Go string, which is how the raw SQL in
+// this service is written.
+var rawString = regexp.MustCompile("(?s)`([^`]*)`")
+
+// sqlSort pulls the sort list out of an ORDER BY, stopping at LIMIT or the
+// statement's end.
+var sqlSort = regexp.MustCompile(`(?is)ORDER\s+BY\s+(.*?)(?:\s+LIMIT\b|;|$)`)
+
+// TestPaginatedSortsBreakTies is a static check, for the same reason
+// TestNoCommentAfterFinalSemicolon is one: the mistake it guards is invisible
+// both in review and at runtime.
+//
+// SQL promises no order among rows an ORDER BY cannot separate, and it does not
+// promise to make the same arbitrary choice twice. Sorted on the date alone —
+// and 19 dates carry more than one event in the English artifact — two events
+// on the same day may be returned in either order, so a caller walking pages
+// can be handed one twice and never shown the other. Downstream that reads as a
+// bot posting a duplicate and silently skipping a real event.
+//
+// A black-box test cannot catch this. The order today is stable because of the
+// query plan SQLite happens to choose, not because anything requires it: with
+// the tiebreaker removed, TestListOrderBreaksTiesById still passes. A new
+// index, a driver upgrade or a different SQLite build can change that plan
+// without a single line of this service changing. So the guarantee has to be
+// asserted where it is actually made — in the sort itself.
+//
+// Only paginated sorts are checked. Without LIMIT/OFFSET there are no page
+// boundaries for an unstable order to fall across, which is why /api/tags
+// sorting by its GROUP BY key alone is fine and is not flagged here.
+func TestPaginatedSortsBreakTies(t *testing.T) {
+	src, err := os.ReadFile("../main.go")
+	if err != nil {
+		t.Fatalf("reading main.go: %v", err)
+	}
+	source := string(src)
+
+	// Resolve string constants so a sort named by identifier can be read.
+	consts := map[string]string{}
+	for _, m := range packageConst.FindAllStringSubmatch(source, -1) {
+		consts[m[1]] = m[2]
+	}
+
+	checked := 0
+	requireTiebreak := func(what, sort string) {
+		t.Helper()
+		checked++
+		if !strings.Contains(strings.ToLower(sort), "id") {
+			t.Errorf("%s sorts by %q with no tiebreaker: rows the sort cannot "+
+				"separate come back in an order SQL does not guarantee, so paging "+
+				"can repeat one event and drop another. Add a unique column — id.",
+				what, sort)
+		}
+	}
+
+	// GORM sorts, whether written inline or by way of a constant.
+	for _, m := range goSort.FindAllStringSubmatch(source, -1) {
+		arg := strings.TrimSpace(m[1])
+		sort, ok := consts[arg]
+		if !ok {
+			sort = strings.Trim(arg, `"`)
+		}
+		requireTiebreak(".Order("+arg+")", sort)
+	}
+
+	// Raw SQL sorts, but only where the statement also paginates.
+	for _, m := range rawString.FindAllStringSubmatch(source, -1) {
+		stmt := m[1]
+		if !strings.Contains(strings.ToUpper(stmt), "OFFSET") {
+			continue
+		}
+		for _, s := range sqlSort.FindAllStringSubmatch(stmt, -1) {
+			// Strip SQL comments: the sort list in this service is annotated,
+			// and a comment mentioning "id" would satisfy the check on its own.
+			sort := ""
+			for _, line := range strings.Split(s[1], "\n") {
+				if i := strings.Index(line, "--"); i >= 0 {
+					line = line[:i]
+				}
+				sort += " " + line
+			}
+			requireTiebreak("a paginated raw query", strings.TrimSpace(sort))
+		}
+	}
+
+	// Without this the test passes whenever the regexes stop matching — a
+	// refactor renaming .Order or reformatting the SQL would silently retire the
+	// guard rather than fail it.
+	if checked < 3 {
+		t.Errorf("found only %d paginated sorts to check, expected at least 3 "+
+			"(/api/events, /api/events/tags/:tag, /api/search); the patterns this "+
+			"test matches on no longer fit the source", checked)
+	}
+}
+
 // TestContextDeadlineBreaksTheRunawayLoop proves the mechanism the service's
 // request timeout depends on. The static check above catches the shape of the
 // mistake; this shows that even when something does run away, a deadline on

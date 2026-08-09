@@ -82,6 +82,18 @@ These are the parts that are not guessable from the endpoint list. Each was a re
 *   **A malformed search query is a 400**, not a 500. Bare `AND`/`OR`/`NOT`, unbalanced
     parentheses or quotes, and a leading `*` are all invalid FTS5. Prefix search
     (`биткоин*`) and `OR`/`NEAR` do work.
+*   **Quoting `q` is a phrase search.** `q="bitcoin price"` wants those words adjacent, in
+    that order — 6 hits against the English artifact. Unquoted, `q=bitcoin price` is an
+    implicit `AND` and finds 39. Before 2026-08-09 the two were the same: the handler doubled
+    every `"` on its way to FTS5, so quotes were silently discarded and a stray `"` answered
+    200 rather than 400.
+*   **`limit` is capped at 1000 and `page` at 1000000**, and both are a 400 when out of range
+    or unparseable rather than being clamped. `limit=abc` used to be page 1 of 20 with a 200.
+    The ceiling sits above the corpus on purpose — `limit=1000` returns every event for a
+    language — so it refuses only values that cannot be meant seriously.
+*   **Lists are newest first, ties broken by `id` descending.** 19 dates carry more than one
+    event in English, and without the tiebreaker paging across one could show an event twice
+    and skip another.
 *   **Rate limiting is 100/min per API key.** Give each consumer its own key: they all reach
     the service over loopback, so anything keyed per-IP would be one shared budget.
 

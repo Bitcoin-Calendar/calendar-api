@@ -2,6 +2,7 @@ package tests
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -27,6 +28,14 @@ func TestSearchRejectsMalformedQueries(t *testing.T) {
 		{"a AND AND b", `fts5: syntax error near "AND"`},
 		{"*", "unknown special query"},
 		{"^", `fts5: syntax error near ""`},
+		// An odd number of quotes. These answered 200 for as long as the handler
+		// doubled every quote before handing the string to FTS5, because the
+		// doubling re-balanced them into an empty phrase — so the one malformed
+		// input a user is most likely to produce by hand was also the one the
+		// documentation wrongly promised was rejected.
+		{`bitcoin"`, "unterminated string"},
+		{`"bitcoin`, "unterminated string"},
+		{`a"b`, "unterminated string"},
 	}
 
 	for _, tc := range malformed {
@@ -55,6 +64,59 @@ func TestSearchStillAcceptsValidSyntax(t *testing.T) {
 				t.Errorf("q=%q returned %d, want 200 — a valid expression was rejected", q, code)
 			}
 		})
+	}
+}
+
+// TestSearchHonoursPhraseQueries is the regression for a bug that returned 200
+// and a plausible answer, which is why nothing caught it for so long.
+//
+// The handler used to run strings.ReplaceAll(q, `"`, `""`) over the caller's
+// string, labelled as sanitisation. The value was already a bound parameter, so
+// there was nothing to sanitise; what the doubling did was turn `"a b"` into
+// `""a b""` — an empty phrase followed by two bare tokens, which FTS5 evaluates
+// as an implicit AND. Quoting therefore did nothing at all, and word order was
+// silently ignored, on precisely the syntax the README and the 400 message both
+// tell callers to reach for. Against the production English artifact,
+// `"bitcoin price"` answered 39 where the phrase matches 6, and `"price
+// bitcoin"` answered the same 39 rather than its own 23.
+//
+// Reversing the word order is what makes this test bite: an implicit AND cannot
+// tell the two apart, and a phrase must.
+func TestSearchHonoursPhraseQueries(t *testing.T) {
+	total := func(q string) int {
+		t.Helper()
+		var list eventList
+		if code := get(t, "/api/search?lang=en&q="+url.QueryEscape(q), &list); code != http.StatusOK {
+			t.Fatalf("q=%q returned %d, want 200", q, code)
+		}
+		return list.Pagination.Total
+	}
+
+	// Event 2's title is "Bitcoin whitepaper published", so the two words are
+	// adjacent in that order and in no other row.
+	const (
+		bothWords    = "whitepaper published"
+		asPhrase     = `"whitepaper published"`
+		reversed     = `"published whitepaper"`
+		wantMatching = 1
+	)
+
+	// The control: if the terms matched nothing, every assertion below would
+	// hold at zero whether or not quoting works.
+	if n := total(bothWords); n != wantMatching {
+		t.Fatalf("q=%q matched %d events, want %d — the fixture no longer supports this test",
+			bothWords, n, wantMatching)
+	}
+
+	if n := total(asPhrase); n != wantMatching {
+		t.Errorf("q=%s matched %d events, want %d: the words are adjacent in that "+
+			"order in event 2's title", asPhrase, n, wantMatching)
+	}
+
+	if n := total(reversed); n != 0 {
+		t.Errorf("q=%s matched %d events, want 0: no row carries those two words "+
+			"in that order, so matching any means the quotes were discarded and "+
+			"the query degraded to an implicit AND", reversed, n)
 	}
 }
 
@@ -154,6 +216,125 @@ func TestValidDateParamsStillWork(t *testing.T) {
 				t.Errorf("%s returned %d events, want %d", tc.query, len(body.Events), tc.want)
 			}
 		})
+	}
+}
+
+// TestPaginationParamsAreRejected extends to page and limit the rule
+// TestMalformedDateParamsAreRejected established for the date filters: a
+// parameter the service cannot honour is a 400, not a silent substitution.
+//
+// These three used to be defaulted without a word — `limit=abc`, `limit=0` and
+// `limit=-5` all came back as page 1 of 20, with a 200 and a body that looks
+// exactly like a correct answer to a different question.
+//
+// The upper bound is the other half. `limit=100000` served the entire artifact
+// in one response: not a load problem at this corpus size, but it lets a caller
+// page through everything by accident and never discover that the endpoint is
+// paginated at all.
+func TestPaginationParamsAreRejected(t *testing.T) {
+	bad := []string{
+		"page=abc", "page=0", "page=-1", "page=1.5", "page=+2", "page=99999999",
+		"limit=abc", "limit=0", "limit=-5", "limit=1001", "limit=100000",
+	}
+
+	// Every list endpoint parses these through the same helper; if one is ever
+	// wired up differently, it is this list that says so.
+	paths := []string{
+		"/api/events?lang=ru&",
+		"/api/events/tags/bitcoin?lang=ru&",
+		"/api/search?lang=ru&q=bitcoin&",
+	}
+
+	for _, p := range paths {
+		for _, q := range bad {
+			t.Run(p+q, func(t *testing.T) {
+				var body map[string]interface{}
+				if code := getAs(t, apiKey3, p+q, &body); code != http.StatusBadRequest {
+					t.Errorf("%s%s returned %d, want 400", p, q, code)
+				}
+				msg, _ := body["error"].(string)
+				if !strings.Contains(msg, "invalid") {
+					t.Errorf("%s%s: unhelpful error %q", p, q, msg)
+				}
+			})
+		}
+	}
+}
+
+// TestPaginationParamsStillWork is the control: rejecting everything would
+// satisfy the test above. The boundary values in particular must be accepted,
+// since an off-by-one in the bound would only ever show up here.
+func TestPaginationParamsStillWork(t *testing.T) {
+	good := []string{"", "page=1", "limit=1", "limit=20", "limit=100", "limit=1000", "page=2&limit=1"}
+
+	for _, q := range good {
+		t.Run(q, func(t *testing.T) {
+			var list eventList
+			if code := getAs(t, apiKey3, "/api/events?lang=ru&"+q, &list); code != http.StatusOK {
+				t.Errorf("%s returned %d, want 200", q, code)
+			}
+		})
+	}
+}
+
+// TestListOrderBreaksTiesById pins the ordering contract from the outside: two
+// events sharing a date come back newest-id first, and paging one at a time
+// shows every event exactly once.
+//
+// Be clear about what this does and does not prove. It does not fail on the
+// unfixed code — with the tiebreaker removed it still passes, because SQLite
+// answers `ORDER BY date desc` from a backward scan of idx_events_date, which
+// happens to yield descending rowid within a date. That is a property of the
+// plan, not a guarantee: SQL promises no order among rows the ORDER BY cannot
+// separate, and a new index or a different SQLite build can change the answer
+// without a line of this service changing.
+//
+// So this is the contract, asserted where a client can see it, and it will
+// catch such a change the day it happens. TestPaginatedSortsBreakTies is the
+// half that catches the sort losing its tiebreaker in the first place.
+func TestListOrderBreaksTiesById(t *testing.T) {
+	var list eventList
+	if code := getAs(t, apiKey3, "/api/events?lang=ru&limit=100", &list); code != http.StatusOK {
+		t.Fatalf("want 200, got %d", code)
+	}
+
+	var tied []int
+	for _, e := range list.Events {
+		if e.Date == "2008-11-01" {
+			tied = append(tied, e.ID)
+		}
+	}
+	if len(tied) != 2 {
+		t.Fatalf("want 2 events on 2008-11-01, got %d — the fixture no longer "+
+			"contains a tie and this test cannot fail", len(tied))
+	}
+	if tied[0] != 5 || tied[1] != 2 {
+		t.Errorf("events sharing 2008-11-01 came back as %v, want [5 2]: ties must "+
+			"break on id so that paging cannot repeat one event and drop another", tied)
+	}
+
+	// Paging one at a time must enumerate every event exactly once. This is the
+	// property the ordering exists to provide; the assertion above is how it is
+	// achieved.
+	seen := map[int]int{}
+	for page := 1; page <= list.Pagination.Total; page++ {
+		var one eventList
+		if code := getAs(t, apiKey3, fmt.Sprintf("/api/events?lang=ru&limit=1&page=%d", page), &one); code != http.StatusOK {
+			t.Fatalf("page %d: want 200, got %d", page, code)
+		}
+		if len(one.Events) != 1 {
+			t.Fatalf("page %d returned %d events, want 1", page, len(one.Events))
+		}
+		seen[one.Events[0].ID]++
+	}
+	for _, e := range list.Events {
+		switch seen[e.ID] {
+		case 1:
+		case 0:
+			t.Errorf("event %d never appeared while paging one at a time", e.ID)
+		default:
+			t.Errorf("event %d appeared %d times while paging one at a time", e.ID, seen[e.ID])
+		}
 	}
 }
 

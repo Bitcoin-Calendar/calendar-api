@@ -160,14 +160,25 @@ Standard HTTP status codes are used. Common error responses include:
 
 ### Rejected input
 
-Two classes of input are answered `400` rather than being quietly absorbed, because in both
-cases the alternative response is indistinguishable from a legitimate empty result:
+Three classes of input are answered `400` rather than being quietly absorbed, because in each
+case the alternative response is indistinguishable from a legitimate result:
 
 **Date filters.** `month`, `day` and `year` must be plain integers in range (`1`–`12`,
 `1`–`31`, four digits). Both `8` and `08` are accepted. Anything else — `abc`, `13`, `0`,
 `8.0`, `+8`, `" 8"` — is rejected. Previously these matched nothing and returned `200` with
 an empty list, which reads exactly like a day with no events: a client with a bug in its
 date arithmetic would report success indefinitely.
+
+**Pagination.** `page` must be an integer in `1`–`1000000`, and `limit` an integer in
+`1`–`1000`. Anything else — `abc`, `0`, `-5`, `1001`, `100000` — is rejected. These used to
+be silently replaced with page 1 of 20, so a caller asking for 500 events got 20 and a `200`,
+with nothing to say it had been overruled.
+
+The `limit` ceiling is a backstop against values that cannot be meant seriously, not a
+page-size discipline: 1000 is above the corpus, so `limit=1000` legitimately returns every
+event for a language in one response. It exists because without any bound `limit=100000` is
+accepted as readily as `limit=20`, and nothing in the response then says the endpoint is
+paginated at all.
 
 **Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
 (`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
@@ -188,10 +199,10 @@ Error responses will typically be in JSON format, like:
 
 *   **Endpoint:** `/events`
 *   **Method:** `GET`
-*   **Description:** Retrieves a paginated list of all historical Bitcoin events, sorted by date in descending order by default. Supports language selection and flexible date filtering by year, month, and/or day. Filters can be combined (e.g., year and month, or year, month, and day).
+*   **Description:** Retrieves a paginated list of all historical Bitcoin events, newest first — `date` descending, with `id` descending breaking ties between events on the same day. Supports language selection and flexible date filtering by year, month, and/or day. Filters can be combined (e.g., year and month, or year, month, and day).
 *   **Query Parameters:**
-    *   `page` (optional, integer): The page number to retrieve. Defaults to `1`.
-    *   `limit` (optional, integer): The number of events per page. Defaults to `20`.
+    *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
+    *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
     *   `year` (optional, string, format: `YYYY` e.g., "2022"): Year for filtering events.
     *   `month` (optional, string, format: `MM` or `M` e.g., "05" or "5"): Month for filtering events.
@@ -250,17 +261,25 @@ Error responses will typically be in JSON format, like:
 
 *   **Endpoint:** `/search`
 *   **Method:** `GET`
-*   **Description:** Performs a full-text search across the `title`, `description`, and `tags` fields of events using SQLite's FTS5 extension. Results are sorted by relevance. Supports language selection and pagination.
+*   **Description:** Performs a full-text search across the `title`, `description`, and `tags` fields of events using SQLite's FTS5 extension. Results are sorted by relevance, with `id` descending breaking ties between equally-ranked rows so that paging cannot repeat one event and drop another. Supports language selection and pagination.
 *   **Query Parameters:**
     *   `q` (required, string): The search query. The query can use FTS5's syntax (e.g., `bitcoin AND halving`, `"satoshi nakamoto"`).
+
+    **Quoting is a phrase search.** `q="bitcoin price"` matches only rows carrying those two
+    words adjacent and in that order; unquoted, `q=bitcoin price` is an implicit `AND` and
+    matches rows carrying both anywhere. Against the English artifact that is 6 hits versus
+    39. Until 2026-08-09 the handler doubled every `"` before passing the string to FTS5,
+    which turned a phrase into an implicit `AND` — so quoting did nothing, word order was
+    ignored, and a stray `"` answered `200` instead of `400`. A client written against that
+    behaviour may be relying on quotes being harmless.
 
     **Tokenizer caveat.** Both languages use FTS5's default `unicode61` tokenizer. It
     case-folds Cyrillic correctly but does **not** stem Russian, so `биткоина` and `биткоин`
     are different tokens and return different result sets (110 vs 246 hits, overlapping in
     only 45 rows). For Russian queries, prefer a prefix match — `биткоин*` returns 361.
 
-    *   `page` (optional, integer): The page number to retrieve. Defaults to `1`.
-    *   `limit` (optional, integer): The number of events per page. Defaults to `20`.
+    *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
+    *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
@@ -379,12 +398,12 @@ Error responses will typically be in JSON format, like:
 
 *   **Endpoint:** `/events/tags/:tag`
 *   **Method:** `GET`
-*   **Description:** Retrieves a paginated list of historical Bitcoin events associated with a specific tag. Events are sorted by date in descending order by default. The tag search is case-insensitive. Supports language selection.
+*   **Description:** Retrieves a paginated list of historical Bitcoin events associated with a specific tag, newest first — `date` descending, with `id` descending breaking ties between events on the same day. The tag search is case-insensitive. Supports language selection.
 *   **Path Parameters:**
     *   `tag` (required, string): The tag to filter events by.
 *   **Query Parameters:**
-    *   `page` (optional, integer): The page number to retrieve. Defaults to `1`.
-    *   `limit` (optional, integer): The number of events per page. Defaults to `20`.
+    *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
+    *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
 *   **Request Body:** None
 *   **Success Response (200 OK):**

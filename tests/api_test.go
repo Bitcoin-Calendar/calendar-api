@@ -44,8 +44,8 @@ func TestServesReadOnlyArtifact(t *testing.T) {
 			t.Errorf("%s fts.consistent: want true", lang)
 		}
 	}
-	if health.Databases["ru"].Rows != 4 || health.Databases["en"].Rows != 3 {
-		t.Errorf("rows: want ru=4 en=3, got ru=%d en=%d",
+	if health.Databases["ru"].Rows != 5 || health.Databases["en"].Rows != 4 {
+		t.Errorf("rows: want ru=5 en=4, got ru=%d en=%d",
 			health.Databases["ru"].Rows, health.Databases["en"].Rows)
 	}
 }
@@ -147,11 +147,11 @@ func TestLanguagesAreSeparate(t *testing.T) {
 	get(t, "/api/events?limit=100&lang=ru", &ru)
 	get(t, "/api/events?limit=100&lang=en", &en)
 
-	if ru.Pagination.Total != 4 {
-		t.Errorf("ru total: want 4, got %d", ru.Pagination.Total)
+	if ru.Pagination.Total != 5 {
+		t.Errorf("ru total: want 5, got %d", ru.Pagination.Total)
 	}
-	if en.Pagination.Total != 3 {
-		t.Errorf("en total: want 3, got %d", en.Pagination.Total)
+	if en.Pagination.Total != 4 {
+		t.Errorf("en total: want 4, got %d", en.Pagination.Total)
 	}
 }
 

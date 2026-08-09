@@ -23,7 +23,14 @@ const (
 	apiKey = "test-key"
 	// A second valid key, so the suite can prove the rate limiter gives each
 	// caller its own budget rather than one shared per-IP bucket.
-	apiKey2       = "test-key-2"
+	apiKey2 = "test-key-2"
+	// A third, for the tests that sweep a matrix of parameters. The limiter
+	// allows 100 requests a minute per key, and a table of a dozen probes across
+	// three endpoints spends enough of the default key's budget to leave later
+	// tests answering 429 — a failure that reads like a bug in whatever ran
+	// last. Per-key budgets are the point of the limiter's design, so the fix is
+	// to use one rather than to trim the coverage.
+	apiKey3       = "test-key-3"
 	allowedOrigin = "http://localhost:3000"
 )
 
@@ -105,7 +112,7 @@ func run(m *testing.M) (int, error) {
 		fmt.Sprintf("LISTEN_ADDR=127.0.0.1:%d", port),
 		"DB_PATH_EN="+filepath.Join(artifactDir, "events_en.db"),
 		"DB_PATH_RU="+filepath.Join(artifactDir, "events_ru.db"),
-		"API_KEYS="+apiKey+","+apiKey2,
+		"API_KEYS="+apiKey+","+apiKey2+","+apiKey3,
 		"CORS_ALLOWED_ORIGINS="+allowedOrigin,
 	)
 	log, err := os.Create(filepath.Join(workDir, "server.log"))
@@ -248,6 +255,24 @@ func fixtureRows(lang string) []fixtureRow {
 			CreatedAt: nil, UpdatedAt: nil,
 			Tags: `["bitcoin", "archives", "bitcoin"]`, URLPath: "/2013-08-09/a-duplicated-tag-lives-here/",
 		},
+		{
+			// Shares 2008-11-01 with event 2, and exists only for that. The
+			// English artifact has 19 dates carrying more than one event, so a
+			// sort on the date alone leaves real ties unbroken — and SQL promises
+			// nothing about the order of rows it cannot separate. Without a tied
+			// pair here, TestListOrderBreaksTiesById cannot fail, and a test that
+			// cannot fail reads like coverage while providing none.
+			//
+			// It deliberately carries neither `bitcoin` in its tags nor
+			// `whitepaper`/`published` in its text: the tag counts and the phrase
+			// search assertions are pinned to exact numbers elsewhere.
+			ID: 5, Date: "2008-11-01",
+			Title:       "A second event on the same day",
+			Description: "Two events share this date, so the sort has a tie to break.",
+			Media:       nil, References: nil,
+			CreatedAt: nil, UpdatedAt: nil,
+			Tags: `["archives"]`, URLPath: "/2008-11-01/a-second-event-on-the-same-day/",
+		},
 	}
 	if lang == "ru" {
 		rows = append(rows, fixtureRow{
@@ -327,14 +352,32 @@ func get(t *testing.T, path string, into interface{}) int {
 	return request(t, http.MethodGet, path, true, into)
 }
 
+// getAs is get under a nominated key, for tests that would otherwise spend the
+// default key's rate-limit budget on behalf of every test that follows them.
+func getAs(t *testing.T, key, path string, into interface{}) int {
+	t.Helper()
+	return requestAs(t, http.MethodGet, path, key, into)
+}
+
 func request(t *testing.T, method, path string, auth bool, into interface{}) int {
+	t.Helper()
+	key := ""
+	if auth {
+		key = apiKey
+	}
+	return requestAs(t, method, path, key, into)
+}
+
+// requestAs sends the request under the given key, or unauthenticated when the
+// key is empty.
+func requestAs(t *testing.T, method, path, key string, into interface{}) int {
 	t.Helper()
 	req, err := http.NewRequest(method, baseURL+path, nil)
 	if err != nil {
 		t.Fatalf("building request: %v", err)
 	}
-	if auth {
-		req.Header.Set("X-API-KEY", apiKey)
+	if key != "" {
+		req.Header.Set("X-API-KEY", key)
 	}
 
 	client := &http.Client{Timeout: 20 * time.Second}

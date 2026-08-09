@@ -94,6 +94,69 @@ func badParam(c *fiber.Ctx, name, got, want string) error {
 	})
 }
 
+// eventOrder is the sort every paginated list endpoint uses: newest first, with
+// id breaking ties.
+//
+// The id is not decoration. SQL guarantees no order among rows the ORDER BY
+// cannot separate, and the artifacts have plenty it cannot: 19 dates carry more
+// than one event in the English database, several in the Russian. Sorted on the
+// date alone, two events on 2017-08-01 may come back in either order, and
+// nothing requires the next request to choose the same one — so a caller
+// walking pages can be handed one event twice and never shown the other. It
+// would read as a bot posting a duplicate and silently dropping an event.
+const eventOrder = "date desc, id desc"
+
+// Pagination bounds.
+const (
+	defaultLimit = 20
+
+	// maxLimit caps one response. It is a backstop against absurd values rather
+	// than a page-size discipline: at 1000 it sits above the corpus — 582 rows
+	// in the larger language — so a caller who asks for it gets everything in
+	// one body, and only a limit that could not be meant seriously is refused.
+	// The bound still matters, because without one limit=100000 is accepted as
+	// readily as limit=20 and nothing in the response says the endpoint is
+	// paginated at all.
+	maxLimit = 1000
+
+	// maxPage keeps (page-1)*limit inside an int. Atoi already rejects anything
+	// wider than int64, but 9223372036854775807 parses fine and overflows the
+	// multiplication into a negative offset, which SQLite silently reads as 0 —
+	// page one, wearing the page number the caller asked for. The corpus is
+	// under a thousand rows per language, so this bound excludes nothing real.
+	maxPage = 1_000_000
+)
+
+// pagination parses and validates page and limit for every list endpoint.
+//
+// Both are validated rather than quietly defaulted, for the reason the date
+// filters are: a corrected parameter answers 200 with a plausible body and the
+// caller never learns it asked for something else. `page=abc`, `limit=-5` and
+// `limit=0` all used to come back as page 1 of 20.
+//
+// It reports ok=false once it has written the 400 itself. badParam's own return
+// value cannot carry that signal — it is c.JSON's error, which is nil on the
+// success path — so a handler that tested it for nil would sail on with a zero
+// page and a zero limit.
+func pagination(c *fiber.Ctx) (page, limit int, ok bool) {
+	pageStr := c.Query("page", "1")
+	limitStr := c.Query("limit", strconv.Itoa(defaultLimit))
+
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 || page > maxPage {
+		badParam(c, "page", pageStr, fmt.Sprintf("1–%d", maxPage))
+		return 0, 0, false
+	}
+
+	limit, err = strconv.Atoi(limitStr)
+	if err != nil || limit < 1 || limit > maxLimit {
+		badParam(c, "limit", limitStr, fmt.Sprintf("1–%d", maxLimit))
+		return 0, 0, false
+	}
+
+	return page, limit, true
+}
+
 // ftsSyntaxErrors are the messages SQLite returns when the *caller's* search
 // string is not a valid FTS5 expression, as opposed to when something is wrong
 // with the server. Measured against the real artifact:
@@ -288,10 +351,8 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
 	db := dbFor(c)
 	tagParam := c.Params("tag")
-	pageStr := c.Query("page", "1")
-	limitStr := c.Query("limit", "20")
 
-	zlog.Info().Str("tag", tagParam).Str("lang", lang).Str("page", pageStr).Str("limit", limitStr).Msg("getEventsByTagHandler called")
+	zlog.Info().Str("tag", tagParam).Str("lang", lang).Msg("getEventsByTagHandler called")
 
 	if tagParam == "" {
 		zlog.Warn().Str("lang", lang).Msg("getEventsByTagHandler: Tag parameter is required")
@@ -300,16 +361,9 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 		})
 	}
 
-	// Pagination parameters
-	page, err := strconv.Atoi(pageStr)
-	if err != nil || page < 1 {
-		zlog.Warn().Str("page", pageStr).Str("lang", lang).Str("tag", tagParam).Err(err).Msg("getEventsByTagHandler: Invalid page parameter")
-		page = 1
-	}
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 1 {
-		zlog.Warn().Str("limit", limitStr).Str("lang", lang).Str("tag", tagParam).Err(err).Msg("getEventsByTagHandler: Invalid limit parameter")
-		limit = 20
+	page, limit, ok := pagination(c)
+	if !ok {
+		return nil
 	}
 	offset := (page - 1) * limit
 
@@ -342,9 +396,9 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 		return queryFailed(c, err, "Failed to count events by tag")
 	}
 
-	// Get paginated events matching the tag
-	// Default sort by date descending
-	dataQuery := db.Model(&Event{}).Order("date desc").Limit(limit).Offset(offset).Where(tagMatch, searchTag)
+	// Get paginated events matching the tag, newest first. See eventOrder for
+	// why the sort does not stop at the date.
+	dataQuery := db.Model(&Event{}).Order(eventOrder).Limit(limit).Offset(offset).Where(tagMatch, searchTag)
 	if err := dataQuery.Find(&events).Error; err != nil {
 		zlog.Error().Str("tag", tagParam).Str("lang", lang).Int("page", page).Int("limit", limit).Err(err).Msg("getEventsByTagHandler: Failed to retrieve events by tag")
 		return queryFailed(c, err, "Failed to retrieve events by tag")
@@ -368,21 +422,15 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 func getAllEventsHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en")
 	db := dbFor(c)
-	pageStr := c.Query("page", "1")
-	limitStr := c.Query("limit", "20")
 	yearStr := c.Query("year")
 	monthStr := c.Query("month")
 	dayStr := c.Query("day")
 
-	zlog.Info().Str("lang", lang).Str("page", pageStr).Str("limit", limitStr).Str("year", yearStr).Str("month", monthStr).Str("day", dayStr).Msg("getAllEventsHandler called")
+	zlog.Info().Str("lang", lang).Str("year", yearStr).Str("month", monthStr).Str("day", dayStr).Msg("getAllEventsHandler called")
 
-	page, _ := strconv.Atoi(pageStr)
-	if page < 1 {
-		page = 1
-	}
-	limit, _ := strconv.Atoi(limitStr)
-	if limit < 1 {
-		limit = 20
+	page, limit, ok := pagination(c)
+	if !ok {
+		return nil
 	}
 	offset := (page - 1) * limit
 
@@ -423,7 +471,7 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 	}
 
 	// Then, apply pagination and retrieve the events
-	if err := query.Order("date desc").Limit(limit).Offset(offset).Find(&events).Error; err != nil {
+	if err := query.Order(eventOrder).Limit(limit).Offset(offset).Find(&events).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getAllEventsHandler: Failed to retrieve events")
 		return queryFailed(c, err, "Failed to retrieve events")
 	}
@@ -448,8 +496,6 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
 	db := dbFor(c)
 	query := c.Query("q")
-	pageStr := c.Query("page", "1")
-	limitStr := c.Query("limit", "20")
 
 	zlog.Info().Str("query", query).Str("lang", lang).Msg("ftsSearchHandler called")
 
@@ -457,14 +503,9 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Search query is required"})
 	}
 
-	// Pagination parameters
-	page, err := strconv.Atoi(pageStr)
-	if err != nil || page < 1 {
-		page = 1
-	}
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 1 {
-		limit = 20
+	page, limit, ok := pagination(c)
+	if !ok {
+		return nil
 	}
 	offset := (page - 1) * limit
 
@@ -476,16 +517,28 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	events := []Event{}
 	var totalEvents int64
 
-	// Sanitize FTS query
-	sanitizedQuery := strings.ReplaceAll(query, "\"", "\"\"")
-
+	// The caller's string is handed to FTS5 as written. It used to be passed
+	// through strings.ReplaceAll(query, `"`, `""`), which was not sanitisation —
+	// the value is already a bound parameter, so there is no injection to
+	// prevent, and MATCH takes an expression rather than a literal. What the
+	// doubling actually did was destroy phrase search: `"bitcoin price"` became
+	// `""bitcoin price""`, which FTS5 reads as an empty phrase followed by two
+	// bare tokens, i.e. an implicit AND. Against the production artifact that
+	// answered 39 where the phrase matches 6, and `"price bitcoin"` returned the
+	// same 39 rather than its own 23 — word order silently ignored, on the one
+	// syntax the documentation tells callers to reach for. It also re-balanced
+	// every stray quote, so `bitcoin"` answered 200 instead of the documented
+	// 400.
+	//
+	// Malformed expressions need no pre-filtering here: SQLite rejects them and
+	// isFTSSyntaxError turns that into a 400.
 	countSQL := `
 		SELECT COUNT(*)
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
 		WHERE events_fts MATCH ?;
 	`
-	if err := db.Raw(countSQL, sanitizedQuery).Scan(&totalEvents).Error; err != nil {
+	if err := db.Raw(countSQL, query).Scan(&totalEvents).Error; err != nil {
 		if isFTSSyntaxError(err) {
 			return badSearchQuery(c, query, lang, err)
 		}
@@ -500,10 +553,14 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
 		WHERE events_fts MATCH ?
-		ORDER BY fts.rank
+		-- e.id breaks ties in rank. Without it equally-ranked rows come back in
+		-- whatever order the scan produces, which is not required to be the same
+		-- order on the next request — so a caller walking pages can be handed one
+		-- event twice and never shown another.
+		ORDER BY fts.rank, e.id DESC
 		LIMIT ? OFFSET ?;
 	`
-	if err := db.Raw(searchSQL, sanitizedQuery, limit, offset).Scan(&events).Error; err != nil {
+	if err := db.Raw(searchSQL, query, limit, offset).Scan(&events).Error; err != nil {
 		if isFTSSyntaxError(err) {
 			return badSearchQuery(c, query, lang, err)
 		}
