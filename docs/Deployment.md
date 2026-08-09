@@ -1,123 +1,104 @@
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
 
-# Docker Deployment Guide for Bitcoin Historical Events API
+# Deployment Guide
 
-This guide provides instructions on how to build, run, and manage the Bitcoin Historical Events API using Docker and Docker Compose.
+The API runs as a **native systemd service**, not in Docker. The `Dockerfile` and
+`docker-compose.yml` this guide used to describe have been removed: nothing deployed with
+them, they built against musl for a glibc host, and the `Dockerfile` was the only place
+recording that the binary needs `-tags fts5`. That knowledge now lives in the `Makefile`.
 
-## Prerequisites
+## Target
 
-- Docker Engine: [Install Docker](https://docs.docker.com/engine/install/)
-- Docker Compose: [Install Docker Compose](https://docs.docker.com/compose/install/)
+|  |  |
+|---|---|
+| host | Ubuntu 24.04 |
+| runs as | user `bitcal`, systemd unit `bitcal-api.service` |
+| binds | `127.0.0.1:3000` only — no public vhost, nginx does not proxy it |
+| reads | `/srv/bitcal/data/current/events_{en,ru}.db`, mode `0444`, in a `0555` directory |
+| built with | `CGO_ENABLED=1 go build -tags fts5`, **on Ubuntu/glibc** |
 
-## Project Structure (`calendar-api-db/` directory)
+## Building
 
--   `main.go`: The main Go application file for the API server. Handles API requests, database connections, and language selection.
--   `database.go`: Go source file defining the `Event` struct and the `InitDB` function for database initialization and schema migration.
--   `go.mod`, `go.sum`: Go module files for dependency management.
--   `Dockerfile`: Defines the multi-stage Docker build for creating a lean production image of the API server. The build process is specifically configured to compile SQLite with FTS5 support.
--   `docker-compose.yml`: Configures the API service for Docker Compose, including build context, port mapping, volume mounts for data persistence, and environment variable settings.
--   `data/`:
-    -   `events.db`: SQLite database for English events (default).
-    -   `events_ru.db`: SQLite database for Russian events (default).
--   `docs/`:
-    -   `APIDocumentation.md`: Detailed information about API endpoints, authentication, and usage.
-    -   `DatabaseDocumentation.md`: Schema details for the SQLite databases and instructions for manual data population.
-    -   `Deployment.md`: This file.
--   `README.md`: Overview of the project, features, and pointers to documentation.
-
-## Building and Running the API
-
-1.  **Navigate to the Project Directory:**
-    Open a terminal and change to the `calendar-api-db` directory (where `docker-compose.yml` is located):
-    ```bash
-    cd /path/to/your/project/calendar-api-db
-    ```
-
-2.  **Set Environment Variables:**
-    The `docker-compose.yml` file is configured to use environment variables. Ensure you have `API_KEYS` (comma-separated if multiple) set in your environment or in a `.env` file in the `calendar-api-db` directory. Example `.env` file content:
-    ```
-    API_KEYS=your_secret_api_key1,another_key2
-    DB_PATH_EN=./data/events.db
-    DB_PATH_RU=./data/events_ru.db
-    PORT=3001
-    ```
-    The `DB_PATH_EN`, `DB_PATH_RU`, and `PORT` variables in the `.env` file will override the defaults in `main.go` if set.
-
-3.  **Build and Run with Docker Compose:**
-    Use the following command to build the Docker image (if changed) and start the API service in detached mode:
-    ```bash
-    docker-compose up --build -d
-    ```
-    - `--build`: Forces Docker Compose to rebuild the image if the `Dockerfile` or application source code has changed.
-    - `-d`: Runs the containers in detached mode.
-
-4.  **Verify the Container is Running:**
-    ```bash
-    docker-compose ps
-    # OR, to see logs:
-    docker-compose logs -f api
-    ```
-    You should see the `calendar-api-db_api_1` (or similar, depending on your directory name) container running and the port (default `3000`) mapped.
-
-5.  **Accessing the API:**
-    The API will be accessible at `http://<your_host_ip>:<PORT>/api` (e.g., `http://localhost:3001/api` or `http://213.176.74.147:3001/api`). Refer to `docs/APIDocumentation.md` for endpoint details.
-
-## Stopping the API
-
-To stop the API service and remove the containers:
-```bash
-docker-compose down
-```
-To only stop the service:
-```bash
-docker-compose stop api
+```sh
+make build          # CGO_ENABLED=1 go build -tags fts5 -ldflags "-X main.version=$(VERSION)"
+make test
+make version        # what will be baked in and reported by /health
 ```
 
-## Data Persistence
+Two things about this build are not optional:
 
-The SQLite database files (`events.db`, `events_ru.db`) are persisted on the host machine via volume mounts defined in `docker-compose.yml`:
+1.  **`-tags fts5`.** `gorm.io/driver/sqlite` uses `mattn/go-sqlite3`, which does not compile
+    FTS5 in by default. Without the tag the binary builds and starts perfectly happily, and
+    then every query touching `events_fts` fails at runtime with `no such module: fts5` — so
+    `/api/search` returns 500 and nothing else complains.
+2.  **Build on Ubuntu/glibc, or in a matching container.** CGO ties the binary to the C
+    library it was built against. A binary built on Alpine (musl) or on a Mac will not start
+    on the box at all. From any host with Docker, `make build-ubuntu` produces one that will.
 
-```yaml
-volumes:
-  - ./data:/app/data
+## Installing
+
+```sh
+sudo install -o root -g root -m 0755 bitcal-api /srv/bitcal/bin/bitcal-api
+sudo cp deploy/bitcal-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bitcal-api
 ```
-This maps the host's `./data` directory (relative to `docker-compose.yml`) to `/app/data` inside the container. The Go application uses these paths (configurable via `DB_PATH_EN` and `DB_PATH_RU` environment variables) to access the databases.
 
-## Environment Variables for the API Server
+The unit sets `LISTEN_ADDR`, `DB_PATH_EN`, `DB_PATH_RU` and `CORS_ALLOWED_ORIGINS`, and reads
+`API_KEYS` from `/etc/bitcal/api.env` so the secret stays out of git. It also applies
+`ProtectSystem=strict` and `ReadOnlyPaths=/srv/bitcal/data`, which makes the read-only rule
+structural: even if a future code change tried to open a database read-write, the kernel
+refuses.
 
-The API server (`main.go`) can be configured using the following environment variables. These can be set in your shell, a `.env` file in the `calendar-api-db` directory (which `docker-compose` automatically loads), or directly in the `docker-compose.yml`.
+## Environment variables
 
--   `API_KEYS`: (Required) Comma-separated list of secret keys for API authentication (e.g., `key1,key2`).
--   `DB_PATH_EN`: Path to the English SQLite database, relative to the app's working directory inside the container (`/app`). Defaults to `./data/events.db` (effectively `/app/data/events.db`).
--   `DB_PATH_RU`: Path to the Russian SQLite database, relative to the app's working directory inside the container (`/app`). Defaults to `./data/events_ru.db` (effectively `/app/data/events_ru.db`).
--   `PORT`: Port for the API server. Defaults to `3000`.
+*   `API_KEYS` — **required**, comma-separated. The service exits if unset.
+*   `DB_PATH_EN` — **required**, no default. The service exits if unset, naming the variable.
+*   `DB_PATH_RU` — **required**, no default. Same.
+*   `LISTEN_ADDR` — defaults to `127.0.0.1:3000`. A systemd unit cannot narrow a bind the app
+    has already widened to `0.0.0.0`, so this default lives in the app.
+*   `CORS_ALLOWED_ORIGINS` — comma-separated, defaults to `http://localhost:3000`.
 
-**Example `docker-compose.yml` section for environment variables:**
-```yaml
-services:
-  api:
-    # ... other configs
-    build: .
-    ports:
-      - "${PORT:-3000}:3000" # Uses PORT from .env or defaults to 3000 for host
-    volumes:
-      - ./data:/app/data
-    environment:
-      - API_KEYS=${API_KEYS} # Must be set in .env or shell
-      - DB_PATH_EN=${DB_PATH_EN:-./data/events.db} # Uses DB_PATH_EN from .env or defaults
-      - DB_PATH_RU=${DB_PATH_RU:-./data/events_ru.db} # Uses DB_PATH_RU from .env or defaults
-      - PORT=${PORT:-3000} # Sets PORT inside container, default used by app is 3000
-    # For the API server to listen on the PORT var inside the container, 
-    # main.go would need to be modified to use os.Getenv("PORT") for app.Listen.
-    # The current main.go hardcodes "3000" or uses PORT env var if set, which is fine.
+There is no `PORT` variable any more; use `LISTEN_ADDR`.
+
+## Releasing a new database artifact
+
+The full procedure is recorded in the comment header of `deploy/bitcal-api.service`, next to
+the unit it applies to. In short: copy the validated databases into a new timestamped release
+directory, `chmod 0444` the files and `0555` the directory, flip the `current` symlink,
+**restart the service** — SQLite holds an open file descriptor, so flipping the symlink alone
+leaves the old inode being served — then `curl localhost:3000/health` and check the reported
+hashes against the `SHA256SUMS` that shipped with the release.
+
+There is no publish script yet; the steps are manual.
+
+## Verifying a deployment
+
+```sh
+systemctl status bitcal-api
+journalctl -u bitcal-api -n 50
+
+curl -s localhost:3000/health | jq .
+curl -s -H "X-API-KEY: $KEY" 'localhost:3000/api/events?month=8&day=9&limit=100&lang=ru' | jq .
+curl -s -H "X-API-KEY: $KEY" 'localhost:3000/api/search?q=bitcoin&lang=en' | jq '.pagination.total'
 ```
-*(Note: The `docker-compose.yml` shown here is an illustrative example of how env vars can be handled; your actual file might differ slightly but should use these variables.)*
+
+`/health` is the one that matters: it names the resolved release path and the SHA-256 of each
+file the process actually has open.
 
 ## Troubleshooting
 
-- **Check Container Logs:** `docker-compose logs -f api`
-- **Port Conflicts:** Ensure the host port (e.g., `3000`) is not in use.
-- **File Permissions:** For the `./data` directory on the host, ensure the user running Docker has permissions.
-- **API Key:** Double-check the `API_KEYS` is set and correctly passed in the `X-API-KEY` header. 
+*   **`no such module: fts5`** — the binary was built without `-tags fts5`. Only `/api/search`
+    and anything else touching `events_fts` will fail; the rest of the API looks fine.
+*   **Exits at startup naming `DB_PATH_EN` or `DB_PATH_RU`** — the variable is unset. There
+    are deliberately no defaults.
+*   **`unable to open database file (14)`** — usually a WAL-mode artifact shipped without its
+    sidecars. Check header bytes 18/19: `02 02` means WAL, `01 01` means delete mode. Fix the
+    artifact. **Do not add `immutable=1`** to work around it — it bypasses locking, is false
+    across a symlink flip, and converts a clean crash into silent wrong reads.
+*   **`attempt to write a readonly database`** — something is issuing a write or DDL against
+    the `0444` artifact. That is the failure working as designed; find the write.
+*   **`/health` hashes do not match the release** — the running process is serving a different
+    inode than you published, almost always a missing restart after the symlink flip.
 
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
