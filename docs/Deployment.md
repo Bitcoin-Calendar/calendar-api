@@ -38,7 +38,7 @@ Two things about this build are not optional:
 ## Installing
 
 ```sh
-sudo install -o root -g root -m 0755 bitcal-api /srv/bitcal/bin/bitcal-api
+sudo install -o root -g root -m 0755 bitcal-api /srv/bitcal/api/bitcal-api
 sudo cp deploy/bitcal-api.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now bitcal-api

@@ -55,7 +55,7 @@ Type=simple
 User=bitcal
 Group=bitcal
 WorkingDirectory=/srv/bitcal
-ExecStart=/srv/bitcal/bin/bitcal-api
+ExecStart=/srv/bitcal/api/bitcal-api
 Restart=on-failure
 RestartSec=5s
 
