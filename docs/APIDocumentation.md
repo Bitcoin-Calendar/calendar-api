@@ -33,6 +33,16 @@ Browser-based clients must comply with Cross-Origin Resource Sharing (CORS) rule
 
 Rate limiting is applied per IP address. The current limit is 100 requests per minute.
 
+## Timeouts
+
+Every endpoint that reads the database carries a **5 second deadline**, enforced on the query
+itself rather than merely on the caller. A request that exceeds it is answered `408 Request
+Timeout`. Nothing legitimate comes close — these queries run in microseconds over a few
+hundred rows — so a 408 means something is wrong, not that you asked for too much.
+
+The connection is bounded separately: 10s to send a request, 15s to receive a response, 60s
+idle.
+
 ## Overview of Endpoints
 
 The API provides the following main functionalities:
@@ -122,6 +132,7 @@ Standard HTTP status codes are used. Common error responses include:
 *   `400 Bad Request`: The request was malformed (e.g., missing required parameters, invalid parameter format).
 *   `401 Unauthorized`: The API key is missing or invalid.
 *   `404 Not Found`: The requested resource (e.g., a specific event) could not be found.
+*   `408 Request Timeout`: The query exceeded its 5 second deadline. See Timeouts above.
 *   `429 Too Many Requests`: Rate limit exceeded.
 *   `500 Internal ServerError`: An unexpected error occurred on the server.
 

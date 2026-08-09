@@ -117,9 +117,10 @@ assume a table exists in both files because you found it in one.
     absence here is genuinely absence rather than a list someone verified was empty. The
     practical consequence for clients: you cannot assume the value parses as an array, so
     branch on null first.
-*   **Tag counting** uses `json_each` over the column (`/api/tags`). Note that
-    `/api/events/tags/:tag` still uses a `LIKE` substring match against the JSON text, which
-    is not the same thing — a known inconsistency, not yet fixed.
+*   **Tag matching** uses `json_each` over the column in both `/api/tags` and
+    `/api/events/tags/:tag`, so the two endpoints always agree on what a tag is and on how
+    many events carry it. `/api/tags` counts **events**, not occurrences — a few rows list
+    the same tag twice in one array, which is a data defect worth normalising in canonical.
 *   **Media URLs are live and self-hosted**, and the API's job is to pass the strings through.
     It does not proxy, validate or rewrite them.
 
