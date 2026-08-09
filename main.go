@@ -173,11 +173,12 @@ func getTagsHandler(c *fiber.Ctx) error {
 	sqlQuery := `
 SELECT
     LOWER(j.value) AS tag,
-    -- DISTINCT because a handful of events list the same tag twice in their
-    -- array (RU 160/231 'price', RU 333 and EN 155 'bitcoin'). COUNT(*) counted
-    -- occurrences, so 'bitcoin' read 446 here against 445 events from
-    -- /api/events/tags/bitcoin. This endpoint documents itself as counting
-    -- events, and now does.
+    -- DISTINCT because this endpoint counts events, not occurrences. Four rows
+    -- once listed the same tag twice (RU 160/231 'price', RU 333 and EN 155
+    -- 'bitcoin'), so COUNT(*) read 446 for 'bitcoin' against the 445 events
+    -- that carried it. Canonical normalised those rows and now rejects
+    -- duplicates in validator invariant 6, so the discrepancy should not recur
+    -- — but the API is not the right place to depend on that.
     COUNT(DISTINCT e.id) AS count
 FROM
     events e,
