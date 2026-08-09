@@ -48,17 +48,35 @@ Detailed documentation for the API, database schema, and deployment can be found
 
 ## Setup and Running
 
-Refer to `docs/Deployment.md` for instructions on building and running the API using Docker.
+```sh
+make build     # CGO_ENABLED=1 go build -tags fts5 …
+make test
+```
+
+`-tags fts5` is mandatory: the SQLite driver does not compile FTS5 in by default, and
+without it a binary builds and starts happily while every search returns 500. Build on
+Ubuntu/glibc or in a matching container (`make build-ubuntu`) — CGO ties the binary to its
+libc, so a Mac- or Alpine-built binary will not start on the server.
+
+Deployment is a native systemd service, not Docker: see `deploy/bitcal-api.service`, whose
+comment header also records the manual release steps for a new database artifact.
 
 ## Environment Variables
 
 The API server uses the following environment variables:
 
 -   `API_KEYS`: (Required) A comma-separated list of secret keys for API authentication. For example: `key1,key2,anotherkey`
--   `DB_PATH_EN`: Path to the English SQLite database. Defaults to `./data/events.db`.
--   `DB_PATH_RU`: Path to the Russian SQLite database. Defaults to `./data/events_ru.db`.
--   `PORT`: Port for the API server. Defaults to `3000`.
+-   `DB_PATH_EN`: (Required) Path to the English SQLite database. No default — startup fails if unset.
+-   `DB_PATH_RU`: (Required) Path to the Russian SQLite database. No default — startup fails if unset.
+-   `LISTEN_ADDR`: Address to bind. Defaults to `127.0.0.1:3000`.
 -   `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins for CORS. Defaults to `http://localhost:3000`.
+
+## Health
+
+`GET /health` is unauthenticated and reports, per language, the symlink-resolved path of the
+database file this process has open, its SHA-256 and its row count. The hash is computed once
+at startup, so it describes the inode actually being served rather than whatever the `current`
+symlink points at when you ask.
 
 ## Testing
 
