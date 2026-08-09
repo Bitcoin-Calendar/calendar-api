@@ -1,93 +1,157 @@
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
 
-# Bitcoin Historical Events API
+# Bitcoin Calendar API
 
-A Go-based, **read-only** API server for historical Bitcoin events. It supports multiple
-languages for event data.
+A small, **read-only** Go service that serves the Bitcoin Calendar event databases over HTTP,
+in English and Russian.
 
-## Project Overview
+It is read-only in a structural sense, not as a convention. The databases are an artifact
+authored and validated in a separate repository and shipped here whole; this service opens
+them with `mode=ro`, never migrates them, and never creates the indexes, triggers or
+full-text tables they already carry. On the server the files are mode `0444` in a `0555`
+directory, and systemd's `ReadOnlyPaths` makes the kernel refuse a write even if a future
+code change tried one.
 
--   **API Server (`main.go`)**: A Fiber-based Go application that serves event data.
-    -   Supports language selection via the `lang` query parameter (e.g., `lang=en`, `lang=ru`).
-    -   Reads `events_en.db` (English, default) and `events_ru.db` (Russian).
-    -   Requires an API key (`X-API-KEY` header) for authentication.
-    -   Uses environment variables for configuration (API keys, database paths, listen address).
--   **Databases**: **not stored in this repository.** The canonical databases are authored and
-    validated elsewhere and shipped to the server as an immutable artifact
-    (`/srv/bitcal/data/current/events_{ru,en}.db`, mode `0444`, in a directory the service user
-    cannot write). This service opens them read-only and never writes, migrates, or creates
-    indexes, triggers or FTS tables — the artifact ships with its own.
+That arrangement exists because the project previously had eighteen divergent copies of the
+same database and no way to tell which one any given consumer was reading.
 
-## Key Features
-
--   Paginated event listings.
--   Filtering events by month/day.
--   Fetching individual events by ID.
--   Listing unique event tags and their counts.
--   Fetching events by specific tags.
--   Language support for event content (English and Russian).
--   Rate limiting and API key authentication.
--   Full-text search functionality on event titles, descriptions, and tags.
-
-## API Endpoints
-
-A brief overview of the main endpoints. For detailed information, see `docs/APIDocumentation.md`.
-
--   `GET /api/events`: Lists all events with pagination.
--   `GET /api/events/:id`: Fetches a single event by its ID.
--   `GET /api/search?q={query}`: Performs a full-text search on events.
--   `GET /api/tags`: Retrieves a list of all unique tags and their usage counts.
--   `GET /api/events/tags/:tag`: Gets events associated with a specific tag.
-
-## Documentation
-
-Detailed documentation for the API, database schema, and deployment can be found in the `/docs` directory:
--   `docs/APIDocumentation.md`
--   `docs/DatabaseDocumentation.md`
--   `docs/Deployment.md`
-
-## Setup and Running
+## Quick start
 
 ```sh
-make build     # CGO_ENABLED=1 go build -tags fts5 …
-make test
+make build          # CGO_ENABLED=1 go build -tags fts5 …
+make test           # black-box: builds the binary, serves a fixture, drives it over HTTP
+
+DB_PATH_EN=/path/events_en.db \
+DB_PATH_RU=/path/events_ru.db \
+API_KEYS=some-secret \
+./bitcal-api
+
+curl localhost:3000/health | jq .
+curl -H "X-API-KEY: some-secret" 'localhost:3000/api/events?month=8&day=9&lang=ru' | jq .
 ```
 
-`-tags fts5` is mandatory: the SQLite driver does not compile FTS5 in by default, and
-without it every search fails at runtime with `no such module: fts5`. A build without the
-tag is refused outright — see `fts5_required.go`. Build on Ubuntu/glibc or in a matching
-container (`make build-ubuntu`) — CGO ties the binary to its libc, so a Mac- or
-Alpine-built binary will not start on the server.
+Two things about the build are not optional:
 
-## Tests
+1.  **`-tags fts5`.** The SQLite driver does not compile FTS5 in by default, and without it
+    every query touching `events_fts` fails at runtime while the rest of the API looks fine.
+    A build without the tag is refused outright — see `fts5_required.go`.
+2.  **Build on Ubuntu/glibc**, or in a matching container (`make build-ubuntu`). CGO ties the
+    binary to the C library it was built against; one built on macOS or Alpine will not start
+    on the server at all.
 
-The suite is in `tests/` and is black-box: it builds this binary, stages a database fixture
-exactly as a release is staged (mode `0444`, in a `0555` directory), starts the service
-against it and drives it over HTTP. So `make test` also exercises the build, the read-only
-open, and the JSON contract the Telegram bot depends on.
+## Endpoints
 
-Deployment is a native systemd service, not Docker: see `deploy/bitcal-api.service`, whose
-comment header also records the manual release steps for a new database artifact.
+Everything under `/api` requires an `X-API-KEY` header. `/health` does not.
 
-## Environment Variables
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Which artifact this process has open, and whether it is fully indexed. Unauthenticated. |
+| `GET /api/events` | Events, paginated. Filter with `year`, `month`, `day`. |
+| `GET /api/events/:id` | One event. |
+| `GET /api/events/tags/:tag` | Events carrying a tag. |
+| `GET /api/tags` | Every tag with the number of events carrying it. |
+| `GET /api/search?q=` | Full-text search over title, description and tags. |
 
-The API server uses the following environment variables:
+All of them take `lang=en` (default) or `lang=ru`. Full detail, including every field and
+every error, is in [docs/APIDocumentation.md](docs/APIDocumentation.md).
 
--   `API_KEYS`: (Required) A comma-separated list of secret keys for API authentication. For example: `key1,key2,anotherkey`
--   `DB_PATH_EN`: (Required) Path to the English SQLite database. No default — startup fails if unset.
--   `DB_PATH_RU`: (Required) Path to the Russian SQLite database. No default — startup fails if unset.
--   `LISTEN_ADDR`: Address to bind. Defaults to `127.0.0.1:3000`.
--   `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins for CORS. Defaults to `http://localhost:3000`.
+## Things that will bite a client
+
+These are the parts that are not guessable from the endpoint list. Each was a real bug.
+
+*   **`date` is a string, `"2013-08-09"`** — not a timestamp. The range starts at 1881-09-29,
+    before the Unix epoch, and there is no time-of-day component to report. The column's
+    *declared* type is `date`, which makes the SQLite driver convert it to a `time.Time`
+    before GORM sees it, so `database.go` carries a scanner that converts it back. Without
+    that the API emits `"1881-09-29T00:00:00Z"` — an invented time and timezone.
+*   **`media` and `references` are JSON arrays encoded as strings**, and `null` when absent —
+    never `""` and never `"[]"`. Decode them a second time. `null` means "no media", which is
+    not the same claim as "an empty list of media".
+*   **`created_at` and `updated_at` are frequently `null`.** Many rows genuinely have no
+    timestamp. Rendering those as `"0001-01-01T00:00:00Z"` would be inventing data.
+*   **`url_path`** (`/2013-08-09/hal-finneys-last-post/`) is the cross-language join key and
+    the website's page URL. It is present on every row.
+*   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
+    returns a list.
+*   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on
+    a typo being caught.
+*   **`/api/tags` returns its list under `data`**, not `tags`.
+*   **A malformed `month`, `day` or `year` is a 400**, deliberately. An unparseable filter
+    used to return an empty list, which is indistinguishable from a day that has no events —
+    a client would post nothing and report success forever.
+*   **A malformed search query is a 400**, not a 500. Bare `AND`/`OR`/`NOT`, unbalanced
+    parentheses or quotes, and a leading `*` are all invalid FTS5. Prefix search
+    (`биткоин*`) and `OR`/`NEAR` do work.
+*   **Rate limiting is 100/min per API key.** Give each consumer its own key: they all reach
+    the service over loopback, so anything keyed per-IP would be one shared budget.
 
 ## Health
 
-`GET /health` is unauthenticated and reports, per language, the symlink-resolved path of the
-database file this process has open, its SHA-256 and its row count. The hash is computed once
-at startup, so it describes the inode actually being served rather than whatever the `current`
-symlink points at when you ask.
+```json
+{
+  "status": "ok",
+  "version": "0.1.0-dd9c9dd",
+  "databases": {
+    "ru": {
+      "path": "/srv/bitcal/data/releases/20260809T095654Z/events_ru.db",
+      "sha256": "13748ac7…",
+      "rows": 582,
+      "fts": { "indexed": 582, "consistent": true }
+    }
+  }
+}
+```
 
-## Testing
+`path` is symlink-resolved and `sha256` is computed once at startup, so this describes the
+inode the process actually has open rather than whatever `current` points at when you ask.
+Those two differing is the failure the endpoint exists to catch.
 
-API will be publicly available in Q3 2026, if you want to test API now, DM [@Tony](https://njump.me/npub10awzknjg5r5lajnr53438ndcyjylgqsrnrtq5grs495v42qc6awsj45ys7) on Nostr – I'll be happy to share a key with you.
+`fts.consistent` is `indexed == rows`: every event is reachable by search. When it is false,
+`status` becomes `degraded` — the service is up and search is silently incomplete.
 
-[![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
+**The service refuses to start** if a full-text index is missing, empty or unreadable. That
+is deliberate: a broken index makes `/api/search` return an empty result set, which is
+indistinguishable from a query that matched nothing, so nothing downstream could ever report
+it. Startup is the only place it can be made loud.
+
+## Deployment
+
+A native systemd service, not Docker. The unit is `deploy/bitcal-api.service`; it binds
+loopback only and is not proxied by nginx.
+
+Database releases are published with `deploy/publish-db.sh`, which validates the source,
+stages it, validates the staged copy again, flips the `current` symlink, restarts the service
+— mandatory, since SQLite holds an open file descriptor and the symlink alone changes nothing
+— then verifies `/health` and rolls back automatically if any of that fails.
+
+See [docs/Deployment.md](docs/Deployment.md).
+
+## Tests
+
+The suite lives in `tests/` and is black-box: it builds this binary, stages a database fixture
+exactly as a release is staged (`0444` in a `0555` directory), starts the service against it
+and drives it over HTTP. So `make test` also exercises the build tag, the read-only open, the
+boot probe and the JSON contract above — none of which a unit test calling `InitDB` directly
+would prove.
+
+## Documentation
+
+*   [docs/APIDocumentation.md](docs/APIDocumentation.md) — every endpoint, field and error
+*   [docs/DatabaseDocumentation.md](docs/DatabaseDocumentation.md) — schema and the artifact contract
+*   [docs/Deployment.md](docs/Deployment.md) — building, installing, releasing, troubleshooting
+
+## Environment
+
+| Variable | |
+| --- | --- |
+| `API_KEYS` | **Required.** Comma-separated. The service exits if unset. |
+| `DB_PATH_EN` | **Required.** No default — the service exits naming the variable. |
+| `DB_PATH_RU` | **Required.** Same. |
+| `LISTEN_ADDR` | Defaults to `127.0.0.1:3000`. |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated. Defaults to `http://localhost:3000`. |
+
+## Access
+
+The API will be publicly available in Q3 2026. To test it before then, DM
+[@Tony](https://njump.me/npub10awzknjg5r5lajnr53438ndcyjylgqsrnrtq5grs495v42qc6awsj45ys7)
+on Nostr and I'll share a key.

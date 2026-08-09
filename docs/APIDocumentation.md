@@ -31,7 +31,16 @@ Browser-based clients must comply with Cross-Origin Resource Sharing (CORS) rule
 
 ## Rate Limiting
 
-Rate limiting is applied per IP address. The current limit is 100 requests per minute.
+**100 requests per minute, per API key.** Each caller should therefore have its own key —
+ask for one rather than sharing.
+
+It is keyed on the API key rather than the client address deliberately: every consumer of
+this service runs on the same host and reaches it over loopback, so a per-IP limit would put
+all of them in one shared bucket, where they would throttle each other with intermittent
+`429`s as the only symptom. Requests with no API key (`/health`, `/metrics`) fall back to
+per-IP.
+
+The response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`.
 
 ## Timeouts
 
@@ -125,16 +134,45 @@ If the `lang` parameter is omitted or an unsupported value is provided, it defau
 The two databases are **separate files with independent `id` sequences**, and they are not
 guaranteed to hold the same events. Use `url_path` to relate an event across languages.
 
+## Empty results
+
+Every endpoint that returns a list returns `"events": []` when nothing matches — never
+`null`. Search was the one exception until it was fixed, so a client written against the old
+behaviour may still carry a needless null check.
+
+An unknown `lang` is **not** an error: it falls back to English. Do not rely on a typo in
+`lang` being caught.
+
 ## Error Responses
 
 Standard HTTP status codes are used. Common error responses include:
 
-*   `400 Bad Request`: The request was malformed (e.g., missing required parameters, invalid parameter format).
+*   `400 Bad Request`: The request was malformed. This covers a missing `q`, a `month`,
+    `day` or `year` that is not a number in range, and a search string that is not a valid
+    FTS5 expression. See *Rejected input* below.
 *   `401 Unauthorized`: The API key is missing or invalid.
 *   `404 Not Found`: The requested resource (e.g., a specific event) could not be found.
+*   `405 Method Not Allowed`: The service is read-only; only `GET`, `HEAD` and `OPTIONS`.
 *   `408 Request Timeout`: The query exceeded its 5 second deadline. See Timeouts above.
 *   `429 Too Many Requests`: Rate limit exceeded.
-*   `500 Internal ServerError`: An unexpected error occurred on the server.
+*   `500 Internal Server Error`: An unexpected error occurred on the server. A `5xx` here
+    means a genuine server fault — bad input is never reported this way.
+
+### Rejected input
+
+Two classes of input are answered `400` rather than being quietly absorbed, because in both
+cases the alternative response is indistinguishable from a legitimate empty result:
+
+**Date filters.** `month`, `day` and `year` must be plain integers in range (`1`–`12`,
+`1`–`31`, four digits). Both `8` and `08` are accepted. Anything else — `abc`, `13`, `0`,
+`8.0`, `+8`, `" 8"` — is rejected. Previously these matched nothing and returned `200` with
+an empty list, which reads exactly like a day with no events: a client with a bug in its
+date arithmetic would report success indefinitely.
+
+**Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
+(`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
+person can reasonably type into a search box, so they are client errors, not server errors.
+Prefix search (`биткоин*`), `OR` and `NEAR` all work normally.
 
 Error responses will typically be in JSON format, like:
 
