@@ -236,121 +236,6 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	})
 }
 
-// Handler for creating a new event
-func createEventHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en'
-	db := getDBInstance(lang)
-	var event Event
-
-	if err := c.BodyParser(&event); err != nil {
-		zlog.Warn().Str("lang", lang).Err(err).Msg("createEventHandler: Error parsing request body")
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Cannot parse JSON"})
-	}
-
-	// Basic validation
-	if event.Title == "" || event.Date == "" {
-		zlog.Warn().Str("lang", lang).Msg("createEventHandler: Title and Date are required fields")
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Title and Date are required fields"})
-	}
-
-	result := db.Create(&event)
-	if result.Error != nil {
-		zlog.Error().Str("lang", lang).Err(result.Error).Msg("createEventHandler: Failed to create event")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create event"})
-	}
-
-	zlog.Info().Uint("id", event.ID).Str("lang", lang).Msg("createEventHandler: Event created successfully")
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"data": event})
-}
-
-// Handler for updating an existing event
-func updateEventHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en'
-	db := getDBInstance(lang)
-	id := c.Params("id")
-	eventID, err := strconv.ParseUint(id, 10, 32)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid Event ID"})
-	}
-
-	var event Event
-	if err := db.First(&event, uint(eventID)).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Database error"})
-	}
-
-	var updateData map[string]interface{}
-	if err := c.BodyParser(&updateData); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Cannot parse JSON"})
-	}
-
-	if err := db.Model(&event).Updates(updateData).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update event"})
-	}
-
-	return c.JSON(fiber.Map{"data": event})
-}
-
-// Handler for deleting an event
-func deleteEventHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en'
-	db := getDBInstance(lang)
-	id := c.Params("id")
-	eventID, err := strconv.ParseUint(id, 10, 32)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid Event ID"})
-	}
-
-	result := db.Delete(&Event{}, uint(eventID))
-	if result.Error != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete event"})
-	}
-	if result.RowsAffected == 0 {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Event not found"})
-	}
-
-	return c.SendStatus(fiber.StatusNoContent)
-}
-
-// Handler for batch creating events
-func batchCreateEventsHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en'
-	db := getDBInstance(lang)
-	var events []Event
-
-	if err := c.BodyParser(&events); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Cannot parse JSON"})
-	}
-
-	if len(events) == 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "No events provided in the batch"})
-	}
-
-	result := db.Create(&events)
-	if result.Error != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create events in batch"})
-	}
-
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message":      "Batch creation successful",
-		"events_added": result.RowsAffected,
-	})
-}
-
-// Handler for /api/events/by-date/{date}
-func getEventsByDateHandler(c *fiber.Ctx) error {
-	// Implementation similar to getEventsByTagHandler, but filtering by date
-	return c.SendString("Handler for getting events by date: Not Implemented")
-}
-
-// Handler for /api/events/by-month/{month}
-func getEventsByMonthHandler(c *fiber.Ctx) error {
-	// Implementation similar to getEventsByTagHandler, but filtering by month
-	return c.SendString("Handler for getting events by month: Not Implemented")
-}
-
 // Handler for getting all events (replaces the inline function in main)
 func getAllEventsHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en")
@@ -471,7 +356,9 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	}
 
 	searchSQL := `
-		SELECT e.id, e.date, e.title, e.description, e.tags, e.media, e.references, fts.rank
+		-- "references" is a SQL reserved word: unquoted, SQLite refuses to
+		-- parse the statement and every search returns 500.
+		SELECT e.id, e.date, e.title, e.description, e.tags, e.media, e."references", e.url_path, fts.rank
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
 		WHERE events_fts MATCH ?
@@ -508,16 +395,6 @@ func main() {
 	// --- Logger Setup ---
 	zlog.Logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
 
-	// --- Prometheus & Metrics Server Setup ---
-	go func() {
-		metricsApp := fiber.New()
-		metricsApp.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
-		zlog.Info().Msg("Starting metrics server on :8000")
-		if err := metricsApp.Listen(":8000"); err != nil {
-			zlog.Fatal().Err(err).Msg("Metrics server failed to start")
-		}
-	}()
-
 	// --- API Key Setup ---
 	apiKeysStr := os.Getenv("API_KEYS")
 	if apiKeysStr == "" {
@@ -539,19 +416,15 @@ func main() {
 	zlog.Info().Int("keys_loaded", len(validAPIKeys)).Msg("API keys loaded")
 
 	// --- Database Initialization for API ---
+	// No fallbacks: the databases are an artifact shipped to a path this
+	// service is told about. A default would silently point at nothing.
 	dbPathEN := os.Getenv("DB_PATH_EN")
 	if dbPathEN == "" {
-		dbPathEN = "./data/events.db"
+		zlog.Fatal().Msg("DB_PATH_EN environment variable is not set")
 	}
 	dbPathRU := os.Getenv("DB_PATH_RU")
 	if dbPathRU == "" {
-		dbPathRU = "./data/events_ru.db"
-	}
-
-	if _, err := os.Stat("./data"); os.IsNotExist(err) {
-		if mkdirErr := os.MkdirAll("./data", 0755); mkdirErr != nil {
-			zlog.Fatal().Err(mkdirErr).Msg("Failed to create data directory")
-		}
+		zlog.Fatal().Msg("DB_PATH_RU environment variable is not set")
 	}
 
 	var err error
@@ -590,7 +463,7 @@ func main() {
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     getAllowedOrigins(),
-		AllowMethods:     "GET,HEAD,OPTIONS,POST,PUT,DELETE",
+		AllowMethods:     "GET,HEAD,OPTIONS",
 		AllowHeaders:     "X-API-KEY,Content-Type",
 		AllowCredentials: false,
 	}))
@@ -598,34 +471,29 @@ func main() {
 	// Setup routes
 	api := app.Group("/api", authMiddleware)
 
-	// Existing endpoints
+	// Read-only endpoints. /api/events answers the date question via the
+	// month/day query parameters; there are deliberately no by-date routes.
 	api.Get("/events/:id", getEventHandler)
 	api.Get("/tags", getTagsHandler)
 	api.Get("/events/tags/:tag", getEventsByTagHandler)
-	api.Post("/events", createEventHandler)
-	api.Put("/events/:id", updateEventHandler)
-	api.Delete("/events/:id", deleteEventHandler)
-	api.Post("/events/batch", batchCreateEventsHandler)
-	api.Get("/events/date/:date", getEventsByDateHandler)
-	api.Get("/events/month/:month", getEventsByMonthHandler)
 	api.Get("/events", getAllEventsHandler)
-	api.Post("/migrate", migrateHandler)
 
 	// New FTS5 search endpoint, replacing the old /search
 	api.Get("/search", ftsSearchHandler)
-
-
 
 	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 
 	// Set up Fiber app
 	app.Static("/", "./docs") // Serve Swagger UI
-	log.Fatal(app.Listen(":3000"))
+	log.Fatal(app.Listen(listenAddr()))
 }
 
-func migrateHandler(c *fiber.Ctx) error {
-	// Placeholder implementation
-	return c.SendString("Migration endpoint hit")
+// listenAddr returns the address to bind. It defaults to loopback: this
+// service has no public vhost, and a systemd unit cannot narrow a bind the
+// app has already widened to 0.0.0.0.
+func listenAddr() string {
+	if v := os.Getenv("LISTEN_ADDR"); v != "" {
+		return v
+	}
+	return "127.0.0.1:3000"
 }
-
-
