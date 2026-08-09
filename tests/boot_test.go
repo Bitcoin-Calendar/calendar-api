@@ -72,18 +72,48 @@ func stageArtifact(t *testing.T, mutate func(*sql.DB) error) string {
 	return dir
 }
 
-// bootService starts a second instance of the real binary against the given
-// artifact directory. It returns the base URL, the service's log, and the
-// startup error if it never became healthy. The process is killed on cleanup
-// whichever of those happened.
-func bootService(t *testing.T, dir string) (base, serviceLog string, startErr error) {
+// instance is a running copy of the real binary, started by the tests.
+type instance struct {
+	base    string
+	proc    *os.Process
+	logPath string
+	exited  <-chan struct{}
+	exitErr *error // valid only once exited is closed
+}
+
+// log reads whatever the service has written so far.
+func (in *instance) log() string {
+	out, _ := os.ReadFile(in.logPath)
+	return string(out)
+}
+
+// signal delivers sig and waits for the process to go away, returning the
+// error from Wait — nil means it exited 0 of its own accord.
+func (in *instance) signal(t *testing.T, sig os.Signal, within time.Duration) error {
+	t.Helper()
+	if err := in.proc.Signal(sig); err != nil {
+		t.Fatalf("sending %v: %v", sig, err)
+	}
+	select {
+	case <-in.exited:
+		return *in.exitErr
+	case <-time.After(within):
+		t.Fatalf("the service ignored %v for %s", sig, within)
+		return nil
+	}
+}
+
+// startService starts a second instance of the real binary against the given
+// artifact directory and waits for it to become healthy. The instance is
+// returned even when startErr is non-nil, so the caller can read its log. The
+// process is killed on cleanup whichever happened.
+func startService(t *testing.T, dir string) (*instance, error) {
 	t.Helper()
 
 	port, err := freePort()
 	if err != nil {
 		t.Fatalf("free port: %v", err)
 	}
-	base = fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	logFile, err := os.Create(logPath)
@@ -112,11 +142,25 @@ func bootService(t *testing.T, dir string) (base, serviceLog string, startErr er
 		<-exited
 	})
 
+	in := &instance{
+		base:    fmt.Sprintf("http://127.0.0.1:%d", port),
+		proc:    srv.Process,
+		logPath: logPath,
+		exited:  exited,
+		exitErr: &exitErr,
+	}
+
 	// Short: every outcome under test is decided within a second or two of
 	// opening the databases, and a wrong answer here should not cost 30s.
-	startErr = waitForHealth(base, exited, &exitErr, 15*time.Second)
-	out, _ := os.ReadFile(logPath)
-	return base, string(out), startErr
+	return in, waitForHealth(in.base, exited, &exitErr, 15*time.Second)
+}
+
+// bootService is the shape most of these tests want: base URL, log, and why
+// startup failed if it did.
+func bootService(t *testing.T, dir string) (base, serviceLog string, startErr error) {
+	t.Helper()
+	in, err := startService(t, dir)
+	return in.base, in.log(), err
 }
 
 // TestBootProbeRejectsUnusableFTS is the reason the probe exists. Each mutation

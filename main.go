@@ -6,9 +6,11 @@ import (
 	"errors"        // Added for gorm.ErrRecordNotFound
 	"log"           // Added for log.Fatal
 	"os"
+	"os/signal"
 	"strconv" // Added for pagination
 	"strings" // Added for tag processing
-	"time"    // Added for rate limiter
+	"syscall"
+	"time" // Added for rate limiter
 
 	"github.com/gofiber/adaptor/v2"
 	"github.com/gofiber/fiber/v2"
@@ -36,6 +38,11 @@ const (
 	readTimeout  = 10 * time.Second
 	writeTimeout = 15 * time.Second // must exceed queryTimeout
 	idleTimeout  = 60 * time.Second
+
+	// shutdownTimeout bounds how long a SIGTERM waits for in-flight requests.
+	// It must exceed queryTimeout, or a request that is still legitimately
+	// working gets cut off by the shutdown rather than by its own deadline.
+	shutdownTimeout = 10 * time.Second
 )
 
 // Define global DB variables for English and Russian databases
@@ -577,7 +584,35 @@ func main() {
 
 	// Set up Fiber app
 	app.Static("/", "./docs") // Serve Swagger UI
-	log.Fatal(app.Listen(listenAddr()))
+
+	// Listen on its own goroutine so this one can wait for a signal.
+	// Listen returns nil once Shutdown has run, so a non-nil error here is a
+	// genuine listener failure — a port already in use, most likely.
+	go func() {
+		if err := app.Listen(listenAddr()); err != nil {
+			zlog.Fatal().Err(err).Msg("Listener failed")
+		}
+	}()
+
+	// publish-db.sh restarts this service on every release, so SIGTERM is a
+	// routine event rather than an exceptional one. Without this, systemd's
+	// TERM kills the process outright and any request in flight — including one
+	// mid-query, which can legitimately take up to queryTimeout — is dropped on
+	// the floor as a connection reset.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-stop
+	zlog.Info().Str("signal", sig.String()).Msg("Shutting down")
+
+	// Longer than queryTimeout, so a request already inside a query gets to
+	// finish rather than being cut off a moment before it would have returned.
+	if err := app.ShutdownWithTimeout(shutdownTimeout); err != nil {
+		zlog.Error().Err(err).Msg("Graceful shutdown failed; exiting anyway")
+	}
+	zlog.Info().Msg("Stopped")
+
+	// The database handles are deliberately not closed here. They are read-only
+	// with nothing buffered to flush, and the process is about to exit.
 }
 
 // listenAddr returns the address to bind. It defaults to loopback: this
