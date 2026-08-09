@@ -440,6 +440,21 @@ func main() {
 	}
 	zlog.Info().Str("db_path", dbPathRU).Msg("Russian database initialized")
 
+	// --- Health snapshot ---
+	healthSnapshot, err = buildHealthSnapshot(map[string]struct {
+		Path string
+		DB   *gorm.DB
+	}{
+		"en": {Path: dbPathEN, DB: DB_EN},
+		"ru": {Path: dbPathRU, DB: DB_RU},
+	})
+	if err != nil {
+		zlog.Fatal().Err(err).Msg("Failed to build health snapshot")
+	}
+	for lang, info := range healthSnapshot.Databases {
+		zlog.Info().Str("lang", lang).Str("path", info.Path).Str("sha256", info.SHA256).Int64("rows", info.Rows).Msg("Artifact opened")
+	}
+
 	// --- Fiber App Initialization ---
 	app := fiber.New()
 
@@ -467,6 +482,10 @@ func main() {
 		AllowHeaders:     "X-API-KEY,Content-Type",
 		AllowCredentials: false,
 	}))
+
+	// Unauthenticated, and outside the /api group on purpose: this is the
+	// check the publisher runs after every release.
+	app.Get("/health", healthHandler)
 
 	// Setup routes
 	api := app.Group("/api", authMiddleware)
