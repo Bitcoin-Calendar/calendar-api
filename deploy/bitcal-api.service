@@ -5,14 +5,24 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now bitcal-api
 #
 # ---------------------------------------------------------------------------
-# Releasing a database artifact — manual, for now. There is no publish script.
+# Releasing a database artifact
 # ---------------------------------------------------------------------------
+#
+# Use deploy/publish-db.sh, which does all of the below plus validation of the
+# staged copy, /health verification and automatic rollback. The manual steps
+# are kept here because they are what the script automates, and because they
+# are what you will need if you ever have to do it by hand.
+#
+# Note: step 1 below connects as root, not as deploy. The deploy user owns the
+# artifacts but is nologin with no home and no keys — it exists so that the
+# bitcal service user cannot write them, not to be logged into.
 #
 #   1. Copy the validated databases into a new timestamped release directory:
 #
 #        R=/srv/bitcal/data/releases/$(date -u +%Y%m%dT%H%M%SZ)
-#        sudo -u deploy mkdir -p "$R"
-#        scp events_{ru,en}.db  deploy@host:"$R"/
+#        ssh root@host "mkdir -p $R"
+#        scp events_{ru,en}.db SHA256SUMS  root@host:"$R"/
+#        ssh root@host "cd $R && sha256sum -c SHA256SUMS"
 #
 #      Ship the bare .db only — no -wal, -shm or -journal beside it, and the
 #      file must not carry a WAL header (bytes 18/19 are 01 01 for delete

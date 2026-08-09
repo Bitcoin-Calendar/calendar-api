@@ -63,14 +63,37 @@ There is no `PORT` variable any more; use `LISTEN_ADDR`.
 
 ## Releasing a new database artifact
 
-The full procedure is recorded in the comment header of `deploy/bitcal-api.service`, next to
-the unit it applies to. In short: copy the validated databases into a new timestamped release
-directory, `chmod 0444` the files and `0555` the directory, flip the `current` symlink,
-**restart the service** — SQLite holds an open file descriptor, so flipping the symlink alone
-leaves the old inode being served — then `curl localhost:3000/health` and check the reported
-hashes against the `SHA256SUMS` that shipped with the release.
+```sh
+./deploy/publish-db.sh --dry-run    # every check, nothing staged or flipped
+./deploy/publish-db.sh              # publish, with a confirmation prompt
+```
 
-There is no publish script yet; the steps are manual.
+`publish-db.sh` automates the runbook that is still recorded in the comment header of
+`deploy/bitcal-api.service`. It:
+
+1.  verifies `SHA256SUMS` against the source databases and runs `validate.py` on them;
+2.  reports whether the artifacts are committed — scoped to the artifact paths, because the
+    canonical repo shares a root with unrelated projects and is therefore always dirty;
+3.  stages into `releases/<ts>.incoming`, verifies the checksums *after transfer*, sets
+    `0444`/`0555` owned by `deploy`, then renames — so a publish that dies midway can never
+    leave something that looks like a valid release;
+4.  runs `validate.py` again **against the staged copy**, because the artifact is a copy and a
+    copy step that opens a database read-write can leave a sidecar or flip the WAL header byte
+    after the source already passed;
+5.  flips the symlink and restarts — the restart is mandatory, SQLite holds an open file
+    descriptor and flipping alone leaves the old inode being served;
+6.  verifies `/health` names the new release, that its hashes match what was published, and
+    that every row is indexed in both languages;
+7.  asserts search still returns hits for `биткоин` and `bitcoin` — the only check here that
+    would catch a tokenizer change, and the Cyrillic one is the case that actually breaks;
+8.  prunes old releases, keeping `--keep N` (default 5).
+
+**Any failure after the symlink flip rolls back automatically** to the previous release and
+restarts it. A rejected release directory is left in place for inspection.
+
+The `deploy` user owns the artifacts but cannot be logged into (`nologin`, no home, no keys) —
+it exists so that `bitcal` cannot write them. Publishing therefore connects as `root` and
+chowns afterwards.
 
 ## Startup checks
 
