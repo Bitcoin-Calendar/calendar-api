@@ -80,6 +80,12 @@ There is no `PORT` variable any more; use `LISTEN_ADDR`.
 4.  runs `validate.py` again **against the staged copy**, because the artifact is a copy and a
     copy step that opens a database read-write can leave a sidecar or flip the WAL header byte
     after the source already passed;
+4b. pulls the staged databases back and runs `TestFixtureSchemaMatchesCanonical` against them,
+    which is the check that stops a new canonical column shipping into an API that cannot emit
+    it. `validate.py` asks whether the data is sound; this asks whether this service can
+    express it, and nothing owned that question until `category` shipped invisibly. A failure
+    here aborts **before** the symlink flip, so the running service is untouched; override with
+    `--allow-schema-drift` if you have decided to publish data ahead of the binary;
 5.  flips the symlink and restarts — the restart is mandatory, SQLite holds an open file
     descriptor and flipping alone leaves the old inode being served;
 6.  verifies `/health` names the new release, that its hashes match what was published, and
@@ -94,6 +100,49 @@ restarts it. A rejected release directory is left in place for inspection.
 The `deploy` user owns the artifacts but cannot be logged into (`nologin`, no home, no keys) —
 it exists so that `bitcal` cannot write them. Publishing therefore connects as `root` and
 chowns afterwards.
+
+## Releasing a new binary
+
+```sh
+./deploy/publish-api.sh --dry-run   # every check, nothing built or installed
+./deploy/publish-api.sh             # build, install, verify, with a prompt
+```
+
+`publish-api.sh` is the counterpart to `publish-db.sh` and their scopes do not overlap: that
+one ships data and never rebuilds, this one ships a binary and never touches the data. It
+automates the procedure that was walked by hand for `ec6b5de`, and it:
+
+1.  refuses to build a dirty or unpushed tree — the binary is exported from `HEAD` with
+    `git archive`, so uncommitted work would be absent from a binary whose version string
+    names the commit as though it were there (`--allow-dirty` overrides);
+2.  runs `make test` locally first, so a broken change costs six seconds rather than a
+    round trip;
+3.  exports `HEAD` to a temp directory **on the box** and builds it there. CGO ties the
+    binary to the C library it was built against, so building on the target makes the glibc
+    match true by construction rather than by remembering to use `make build-ubuntu`. Nothing
+    persists: no source tree, no build output. `VERSION` is passed explicitly because the
+    exported tree has no `.git` and the Makefile's fallback would silently yield
+    `0.1.0-unknown`;
+4.  runs `make test` **again on the box**, which is the layer that proves the `fts5` tag, the
+    read-only open and the boot probe against the target's own libc;
+5.  backs the running binary up to `bitcal-api.bak-<UTC timestamp>`, then *renames* the new
+    one over it — writing over a busy executable in place fails with `ETXTBSY`, while a
+    rename swaps the directory entry and leaves the running process on its old inode;
+6.  restarts, watching `NRestarts` so a crash-loop is reported in seconds rather than at the
+    timeout;
+7.  verifies `/health` reports the new `version` **and that the database sha256s, row counts
+    and release paths are unchanged**. A binary deploy must not move the data; if those
+    hashes moved, the two release paths have collided and that is worth knowing immediately;
+8.  sends one real search through the new binary, since `/health` does not exercise the query
+    path or the FTS module;
+9.  prunes old `.bak` binaries, keeping `--keep N` (default 5).
+
+**Any failure after the install rolls back automatically** by restoring the `.bak` binary and
+restarting.
+
+The two paths are independent, so the box can serve new data on an old binary or the reverse.
+That is allowed — on 2026-08-09 it did exactly that for about 35 minutes — but when
+diagnosing anything, check both halves of `/health`.
 
 ## Startup checks
 

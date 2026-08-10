@@ -53,6 +53,23 @@ Present in both database files, with identical definitions.
 | `created_at`  | `datetime`    |               | Row bookkeeping. `NULL` on most rows. |
 | `updated_at`  | `datetime`    |               | Row bookkeeping. `NULL` on most rows. |
 | `url_path`    | `TEXT`        | `UNIQUE` index | `/<date>/<slug>/`. The website's page path and the cross-language join key. |
+| `category`    | `TEXT`        | none in the DDL | The event's single classification, from a closed list of 14. Added to canonical 2026-08-09. **Mandatory by validator invariant 13, not by the schema** — the column is declared `notnull=0`, so the data is clean because the publisher checks it, not because SQLite would refuse otherwise. Measured 2026-08-10 across both artifacts: 0 `NULL`, 0 `''`, 0 values outside the 14, in 1,146 rows. |
+
+**On `category`.** The 14 values are `archives`, `bitcoin`, `first`, `holiday`, `legal`,
+`lightning`, `macro`, `mining`, `mustread`, `obituary`, `price`, `privacy`, `scam`,
+`software`. It replaces an older convention in which consumers read the classification out of
+`tags[0]`; tag order no longer carries meaning and that inference is now wrong. `bitcoin` is
+the clearest case — it exists as a category (148 RU, 82 EN) and **no longer exists as a tag at
+all**, so a hard-coded `tag=bitcoin` query returns zero rows.
+
+The two languages disagree about the category of 62 of the 500 events they share by
+`url_path`. That is catalogued in canonical's README and is data, not a bug — but a
+two-language filter built on this column will return genuinely different sets.
+
+**The two languages declare these columns in different orders.** RU stores `media` fourth, EN
+eighth; the names and types match but the positions do not. Anything reading this schema must
+match on **name** — a positional assumption is correct against one artifact and silently wrong
+against the other.
 
 **On `date`'s declared type.** SQLite has no date type; the value is text. But the column is
 *declared* `date`, and `mattn/go-sqlite3` converts any column declared `date`, `datetime` or
@@ -68,6 +85,14 @@ because those really are timestamps.
 *   `idx_events_tags` on `tags` — of little use, since `tags` holds a JSON blob
 *   `idx_events_url_path` on `url_path`, **UNIQUE**
 *   the implicit index on `id` as `PRIMARY KEY`
+
+**There is no index on `category`**, in either language. Verified 2026-08-10 against both
+released artifacts: `EXPLAIN QUERY PLAN SELECT * FROM events WHERE category=?` reports
+`SCAN events`. A filter on this column is a full table scan. That is fine at 565 and 581 rows —
+microseconds — and it is no worse than the date filters, which cannot use `idx_events_date`
+either, or the tag filter, which runs `json_each` over every row. It is recorded here so that
+nobody argues for a feature on indexed-lookup grounds that do not hold. This service is
+read-only and **cannot create the index**; that would be a change to canonical.
 
 ## Full-text search: `events_fts`
 

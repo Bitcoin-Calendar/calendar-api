@@ -71,6 +71,12 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     timestamp. Rendering those as `"0001-01-01T00:00:00Z"` would be inventing data.
 *   **`url_path`** (`/2013-08-09/hal-finneys-last-post/`) is the cross-language join key and
     the website's page URL. It is present on every row.
+*   **`category` is not `tags[0]`.** Every event has exactly one `category`, from a closed list
+    of 14, and it is what the website colours and filters by. Consumers used to derive it from
+    the first tag; tag order carries no meaning now and that inference is wrong. `bitcoin` is
+    the sharp edge: it is a category on 148 RU and 82 EN events and **no longer a tag on any**,
+    so `/api/events/tags/bitcoin` returns an empty list. There is no `?category=` filter yet —
+    fetch and filter client-side, or ask for one.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
     returns a list.
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on
@@ -131,10 +137,18 @@ it. Startup is the only place it can be made loud.
 A native systemd service, not Docker. The unit is `deploy/bitcal-api.service`; it binds
 loopback only and is not proxied by nginx.
 
-Database releases are published with `deploy/publish-db.sh`, which validates the source,
-stages it, validates the staged copy again, flips the `current` symlink, restarts the service
-— mandatory, since SQLite holds an open file descriptor and the symlink alone changes nothing
-— then verifies `/health` and rolls back automatically if any of that fails.
+There are two release paths and they do not overlap:
+
+*   **`deploy/publish-db.sh`** ships database artifacts. It validates the source, stages it,
+    validates the staged copy again, checks that this API can actually emit the staged
+    schema, flips the `current` symlink, restarts the service — mandatory, since SQLite holds
+    an open file descriptor and the symlink alone changes nothing — then verifies `/health`.
+*   **`deploy/publish-api.sh`** ships the binary. It builds on the box (CGO ties the binary to
+    the target's glibc), runs the suite there, backs the running binary aside, installs,
+    restarts, and asserts `/health` shows a new version **and unchanged data**.
+
+Both roll back automatically if anything after the irreversible step fails. Because they are
+independent, the binary and the data drift; check both halves of `/health` when diagnosing.
 
 See [docs/Deployment.md](docs/Deployment.md).
 
