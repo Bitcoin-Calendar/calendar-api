@@ -54,7 +54,11 @@ func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 // Event matches the schema of the canonical database artifact:
 //
 //	events(id, date, title, description, media, tags, "references",
-//	       created_at, updated_at, url_path)
+//	       created_at, updated_at, url_path, category)
+//
+// The column order above is RU's. EN declares the same names in a different
+// order — media is fourth in RU and eighth in EN — so nothing here or in the
+// tests may be positional; match on names.
 //
 // Date is TEXT in YYYY-MM-DD form and the range starts at 1881-09-29 — before
 // the Unix epoch. It is a string here so the API emits "1881-09-29" rather than
@@ -66,6 +70,20 @@ func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 //
 // URLPath is /<date>/<slug>/, the cross-language join key and the website's
 // page URL. The Telegram bot already reads it.
+//
+// Category is the single mandatory classification, one value per row from a
+// closed list of 14, and it is what the website colours and filters by. It is a
+// plain string rather than a pointer on purpose: absence is a validator failure
+// upstream, not a state this API should be able to represent. Note that the
+// closed list is enforced by validate.py invariant 13 and not by the DDL — the
+// column is declared TEXT with notnull=0 — so the data is clean because the
+// publisher checks it, not because the database would refuse otherwise.
+// Measured 2026-08-10 across both artifacts: 0 NULL, 0 empty, 0 values outside
+// the 14, in 1,146 rows.
+//
+// Consumers used to derive this from tags[0]. That inference is now wrong: tag
+// order carries no meaning, and `bitcoin` is a category value with no
+// corresponding tag left in the data at all.
 //
 // CreatedAt and UpdatedAt are pointers for the same reason as Media: they are
 // genuinely absent on many rows (505 of 582 RU created_at, 265 of 565 EN), and
@@ -82,6 +100,7 @@ type Event struct {
 	Media       *string    `json:"media" gorm:"type:text"`      // JSON array as string, e.g. ["url1","url2"]; NULL when absent
 	References  *string    `json:"references" gorm:"type:text"` // JSON array as string; NULL when absent
 	URLPath     string     `json:"url_path" gorm:"column:url_path"`
+	Category    string     `json:"category" gorm:"column:category"`
 	CreatedAt   *time.Time `json:"created_at"` // NULL on many rows; renders as null
 	UpdatedAt   *time.Time `json:"updated_at"` // NULL on many rows; renders as null
 }

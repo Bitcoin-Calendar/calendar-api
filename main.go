@@ -549,7 +549,23 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	searchSQL := `
 		-- "references" is a SQL reserved word: unquoted, SQLite refuses to
 		-- parse the statement and every search returns 500.
-		SELECT e.id, e.date, e.title, e.description, e.tags, e.media, e."references", e.url_path, fts.rank
+		--
+		-- This list is the one place in the service that names columns by hand;
+		-- every other handler goes through db.Model(&Event{}) and picks up a new
+		-- field for free. So this is the statement that silently drops one, and
+		-- it had dropped three: category, created_at and updated_at all reached
+		-- callers empty while /api/events returned them correctly.
+		-- TestEventStructCoversEveryColumn covers search specifically for that
+		-- reason, and checks the values rather than the keys, because a struct
+		-- field the SELECT never fetched still marshals to "" or null.
+		--
+		-- fts.rank is deliberately not selected: nothing scans it — there is no
+		-- Rank field on Event — and SQLite orders by it perfectly well without
+		-- it appearing here. Selecting it only implied a field that does not
+		-- exist. Exposing rank as JSON would be a new contract decision: the
+		-- value is FTS5-internal, negative, and incomparable across queries.
+		SELECT e.id, e.date, e.title, e.description, e.tags, e.media, e."references",
+		       e.url_path, e.category, e.created_at, e.updated_at
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
 		WHERE events_fts MATCH ?
