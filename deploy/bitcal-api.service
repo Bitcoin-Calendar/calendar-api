@@ -5,6 +5,64 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now bitcal-api
 #
 # ---------------------------------------------------------------------------
+# Two release paths, deliberately separate
+# ---------------------------------------------------------------------------
+#
+#   deploy/publish-db.sh    ships database artifacts. Never rebuilds anything.
+#   deploy/publish-api.sh   ships the binary. Never touches the data.
+#
+# They are independent, which means they drift: on 2026-08-09 the box served
+# freshly published artifacts for about 35 minutes while still running the
+# previous binary. That is allowed and usually fine — but when you are
+# diagnosing something, check both. /health reports the binary's version and
+# the artifact's sha256 side by side for exactly that reason.
+#
+# ---------------------------------------------------------------------------
+# Releasing the binary
+# ---------------------------------------------------------------------------
+#
+# Use deploy/publish-api.sh. The steps it automates, for when you have to do it
+# by hand:
+#
+#   1. Export the committed tree to the box and build it THERE. CGO ties the
+#      binary to the C library it was built against; this box is glibc 2.39 and
+#      a binary built on a Mac will not start at all:
+#
+#        D=$(ssh root@host "mktemp -d /tmp/bitcal-build.XXXXXX")
+#        git archive --format=tar HEAD | ssh root@host "tar -x -C $D"
+#        ssh root@host "cd $D && PATH=/usr/local/go/bin:\$PATH \
+#                       make build VERSION=0.1.0-\$(git rev-parse --short HEAD)"
+#
+#      Pass VERSION explicitly. The exported tree has no .git, so the
+#      Makefile's `git rev-parse` fallback yields 0.1.0-unknown — and you find
+#      out from /health afterwards. Go is at /usr/local/go/bin and is not on
+#      root's PATH.
+#
+#   2. Run `make test` in that directory, on the box. The suite is black-box —
+#      it builds the binary, stages a fixture at 0444 in a 0555 directory and
+#      drives it over HTTP — so it proves the fts5 build tag, the read-only
+#      open and the boot probe against this machine's own libc. ~8s.
+#
+#   3. Back up the running binary, then RENAME the new one over it. Writing
+#      over a busy executable in place fails with ETXTBSY; a rename swaps the
+#      directory entry and leaves the running process on its old inode:
+#
+#        sudo cp -p /srv/bitcal/api/bitcal-api \
+#                   /srv/bitcal/api/bitcal-api.bak-$(date -u +%Y%m%dT%H%M%SZ)
+#        sudo cp $D/bitcal-api /srv/bitcal/api/bitcal-api.new
+#        sudo chown root:root /srv/bitcal/api/bitcal-api.new
+#        sudo chmod 0755 /srv/bitcal/api/bitcal-api.new
+#        sudo mv -f /srv/bitcal/api/bitcal-api.new /srv/bitcal/api/bitcal-api
+#        sudo systemctl restart bitcal-api
+#
+#   4. Verify /health reports the new `version` AND the same database sha256s
+#      and row counts as before. A binary deploy must not move the data — if
+#      those hashes changed, something else restarted into a different release
+#      and the two paths above have collided.
+#
+#      Roll back by copying the .bak-<timestamp> back over and restarting.
+#
+# ---------------------------------------------------------------------------
 # Releasing a database artifact
 # ---------------------------------------------------------------------------
 #
