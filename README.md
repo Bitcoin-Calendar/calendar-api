@@ -75,10 +75,11 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     website colours and filters by. Consumers used to derive it from the first tag; tag order
     carries no meaning now and that inference is wrong. `bitcoin` is the sharp edge: it is a
     category on 132 RU and 66 EN events and **no longer a tag on any**, so
-    `/api/events/tags/bitcoin` returns an empty list. The set of categories is closed but
-    **owned by the data and liable to grow** — `security` appeared a day after the column did —
-    so accept unrecognised values rather than hardcoding the list. There is no `?category=`
-    filter yet: fetch and filter client-side, or ask for one.
+    `/api/events/tags/bitcoin` returns an empty list. Filter with `/api/events?category=…` and
+    discover the values with `/api/categories`. The set is closed but **owned by the data and
+    liable to grow** — `security` appeared a day after the column did — so accept unrecognised
+    values rather than hardcoding the list. The service derives the accepted values from the
+    artifact at startup for that reason; an unknown category is a `400`, not an empty list.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
     returns a list.
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on

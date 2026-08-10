@@ -287,6 +287,52 @@ type TagInfo struct {
 	Count int    `json:"count"`
 }
 
+// Structure for the /api/categories response
+type CategoryInfo struct {
+	Category string `json:"category"`
+	Count    int    `json:"count"`
+}
+
+// Handler for /api/categories — the counterpart to /api/tags, and what a client
+// needs to build a filter UI without fetching every event to discover what
+// exists.
+//
+// Simpler than getTagsHandler in one way that matters: tags are a JSON array,
+// so that query joins through json_each and must COUNT(DISTINCT e.id) to avoid
+// counting a row twice when it lists a tag twice. category is exactly one value
+// per row, so a plain COUNT(*) is already an event count and cannot disagree
+// with /api/events?category=.
+func getCategoriesHandler(c *fiber.Ctx) error {
+	lang := c.Query("lang", "en")
+	db := dbFor(c)
+
+	zlog.Info().Str("lang", lang).Msg("getCategoriesHandler called")
+
+	var result []CategoryInfo
+	// NOTHING MAY FOLLOW THE FINAL SEMICOLON — see getTagsHandler for what a
+	// trailing comment does to this driver. It is not a style rule.
+	sqlQuery := `
+SELECT
+    LOWER(TRIM(category)) AS category,
+    COUNT(*) AS count
+FROM
+    events
+WHERE
+    category IS NOT NULL
+    AND TRIM(category) != ''
+GROUP BY
+    LOWER(TRIM(category))
+ORDER BY
+    category ASC;`
+	if err := db.Raw(sqlQuery).Scan(&result).Error; err != nil {
+		zlog.Error().Str("lang", lang).Err(err).Msg("getCategoriesHandler: Error executing raw SQL for categories")
+		return queryFailed(c, err, "Failed to retrieve categories from database")
+	}
+
+	zlog.Info().Int("category_count", len(result)).Str("lang", lang).Msg("getCategoriesHandler: Successfully retrieved categories")
+	return c.JSON(fiber.Map{"data": result})
+}
+
 // Handler for /api/tags
 func getTagsHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en") // Default to 'en' if not specified
@@ -462,6 +508,26 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 			return badParam(c, "day", dayStr, "1–31")
 		}
 		query = query.Where("strftime('%d', date) = ?", pad2(dayStr))
+	}
+
+	// category is validated against the vocabulary this artifact actually
+	// carries, read at boot by loadCategories. An unknown value is a 400 for
+	// the same reason a malformed month is: answering 200 with an empty list
+	// makes "there is no such category" indistinguishable from "that category
+	// has no events", and a client cannot tell a typo from a quiet corner of
+	// the corpus.
+	//
+	// Matched case-insensitively, like the tag filter, and lowercased on the
+	// way in because every stored value is lowercase.
+	if categoryStr := c.Query("category"); categoryStr != "" {
+		want := strings.ToLower(strings.TrimSpace(categoryStr))
+		if !categoriesByLang[lang].known(want) {
+			return badParam(c, "category", categoryStr, "one of: "+categoriesByLang[lang].list())
+		}
+		// LOWER on the column, not a bare equality: the closed set is enforced
+		// by the publisher rather than by the schema, so this must not depend
+		// on the stored casing being what it is today.
+		query = query.Where("LOWER(TRIM(category)) = ?", want)
 	}
 
 	// First, get the total count of records that match the filter
@@ -654,6 +720,19 @@ func main() {
 	}
 	zlog.Info().Str("db_path", dbPathRU).Msg("Russian database initialized")
 
+	// --- Category vocabulary ---
+	// Read from the artifacts rather than compiled in, so a category canonical
+	// adds works as soon as its data is published rather than after a rebuild
+	// and a deploy. See loadCategories.
+	for lang, db := range map[string]*gorm.DB{"en": DB_EN, "ru": DB_RU} {
+		set, err := loadCategories(db)
+		if err != nil {
+			zlog.Fatal().Str("lang", lang).Err(err).Msg("Failed to read the category vocabulary")
+		}
+		categoriesByLang[lang] = set
+		zlog.Info().Str("lang", lang).Int("categories", len(set.sorted)).Msg("Category vocabulary loaded")
+	}
+
 	// --- Health snapshot ---
 	healthSnapshot, err = buildHealthSnapshot(map[string]struct {
 		Path string
@@ -748,6 +827,7 @@ func main() {
 	// deadline. dbFor picks the deadline up from the request context.
 	api.Get("/events/:id", timeout.NewWithContext(getEventHandler, queryTimeout))
 	api.Get("/tags", timeout.NewWithContext(getTagsHandler, queryTimeout))
+	api.Get("/categories", timeout.NewWithContext(getCategoriesHandler, queryTimeout))
 	api.Get("/events/tags/:tag", timeout.NewWithContext(getEventsByTagHandler, queryTimeout))
 	api.Get("/events", timeout.NewWithContext(getAllEventsHandler, queryTimeout))
 
