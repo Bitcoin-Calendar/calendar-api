@@ -201,7 +201,7 @@ func TestTagsEndpointResponds(t *testing.T) {
 }
 
 // TestTagCountsAgreeWithByTagEndpoint pins the two endpoints together. They
-// disagreed by one for 'bitcoin' because /api/tags counted occurrences while
+// disagreed by one for 'satoshi' because /api/tags counted occurrences while
 // /api/events/tags/:tag counts events, and some events list a tag twice.
 func TestTagCountsAgreeWithByTagEndpoint(t *testing.T) {
 	var body struct {
@@ -222,7 +222,7 @@ func TestTagCountsAgreeWithByTagEndpoint(t *testing.T) {
 }
 
 // TestTagCountsEventsNotOccurrences is the specific case behind that
-// disagreement: fixture event 3 lists "bitcoin" twice.
+// disagreement: fixture event 3 lists "satoshi" twice.
 func TestTagCountsEventsNotOccurrences(t *testing.T) {
 	var body struct {
 		Data []tagInfo `json:"data"`
@@ -230,16 +230,16 @@ func TestTagCountsEventsNotOccurrences(t *testing.T) {
 	get(t, "/api/tags?lang=ru", &body)
 
 	for _, tag := range body.Data {
-		if tag.Tag != "bitcoin" {
+		if tag.Tag != "satoshi" {
 			continue
 		}
 		// Events 2, 3 and 4 carry it; event 3 carries it twice.
 		if tag.Count != 3 {
-			t.Fatalf("bitcoin: want 3 events, got %d — counting occurrences, not events", tag.Count)
+			t.Fatalf("satoshi: want 3 events, got %d — counting occurrences, not events", tag.Count)
 		}
 		return
 	}
-	t.Fatal("bitcoin missing from /api/tags")
+	t.Fatal("satoshi missing from /api/tags")
 }
 
 // TestTagFilterIgnoresLikeWildcards guards a defect that answered a question
@@ -268,7 +268,7 @@ func TestTagFilterIgnoresLikeWildcards(t *testing.T) {
 	// match anything, bug or no bug. An assertion that cannot fail is worse
 	// than no assertion, because it reads like coverage.
 	probes := []struct{ wildcard, literal string }{
-		{"bitcoi_", "bitcoin"}, // _ matches exactly one character
+		{"satosh_", "satoshi"}, // _ matches exactly one character
 		{"_____", "price"},     // five characters, and `price` is five long
 	}
 
@@ -290,14 +290,14 @@ func TestTagFilterIgnoresLikeWildcards(t *testing.T) {
 // the wildcards.
 func TestTagFilterIsCaseInsensitive(t *testing.T) {
 	var lower, upper eventList
-	get(t, "/api/events/tags/bitcoin?lang=ru&limit=1", &lower)
-	get(t, "/api/events/tags/BITCOIN?lang=ru&limit=1", &upper)
+	get(t, "/api/events/tags/satoshi?lang=ru&limit=1", &lower)
+	get(t, "/api/events/tags/SATOSHI?lang=ru&limit=1", &upper)
 
 	if lower.Pagination.Total == 0 {
-		t.Fatal("bitcoin matched nothing")
+		t.Fatal("satoshi matched nothing")
 	}
 	if lower.Pagination.Total != upper.Pagination.Total {
-		t.Errorf("case sensitivity: bitcoin=%d BITCOIN=%d",
+		t.Errorf("case sensitivity: satoshi=%d SATOSHI=%d",
 			lower.Pagination.Total, upper.Pagination.Total)
 	}
 }

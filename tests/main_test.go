@@ -258,16 +258,28 @@ func fixtureRows(lang string) []fixtureRow {
 			Media:       strptr(`["https://example.org/whitepaper.png"]`),
 			References:  strptr(`["https://bitcoin.org/bitcoin.pdf"]`),
 			CreatedAt:   strptr("2026-08-08 09:59:56"), UpdatedAt: strptr("2026-08-08 09:59:56"),
-			Tags: `["bitcoin", "mustread"]`, URLPath: "/2008-11-01/bitcoin-whitepaper-published/",
+			Tags: `["satoshi", "mustread"]`, URLPath: "/2008-11-01/bitcoin-whitepaper-published/",
 			Category: "mustread",
 		},
 		{
 			ID: 3, Date: "2013-08-09",
-			Title:       "A duplicated tag lives here",
-			Description: "This row lists bitcoin twice, as four real rows in canonical do.",
+			Title: "A duplicated tag lives here",
+			// Canonical had four such rows when this fixture was written. It has
+			// none today — the 2026-08-10 tag cleanup deduplicated them — so this
+			// row no longer mirrors the data, and that is deliberate.
+			//
+			// It stays because the defect it guards is in the handler, not in the
+			// data: /api/tags counted occurrences while /api/events/tags/:tag
+			// counted events, so the two disagreed by one for any tag listed
+			// twice. Removing the duplicate would leave
+			// TestTagCountsEventsNotOccurrences unable to fail, which is worse
+			// than a fixture that is deliberately harsher than production — a
+			// test that cannot fail reads like coverage while providing none.
+			// Nothing stops canonical reintroducing a duplicate tomorrow.
+			Description: "This row lists satoshi twice; canonical no longer does, but the handler must still count events.",
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
-			Tags: `["bitcoin", "archives", "bitcoin"]`, URLPath: "/2013-08-09/a-duplicated-tag-lives-here/",
+			Tags: `["satoshi", "archives", "satoshi"]`, URLPath: "/2013-08-09/a-duplicated-tag-lives-here/",
 			Category: "archives",
 		},
 		{
@@ -278,7 +290,7 @@ func fixtureRows(lang string) []fixtureRow {
 			// pair here, TestListOrderBreaksTiesById cannot fail, and a test that
 			// cannot fail reads like coverage while providing none.
 			//
-			// It deliberately carries neither `bitcoin` in its tags nor
+			// It deliberately carries neither `satoshi` in its tags nor
 			// `whitepaper`/`published` in its text: the tag counts and the phrase
 			// search assertions are pinned to exact numbers elsewhere.
 			ID: 5, Date: "2008-11-01",
@@ -299,7 +311,11 @@ func fixtureRows(lang string) []fixtureRow {
 			Description: "Идентификаторы независимы в каждом языке.",
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
-			Tags: `["bitcoin"]`, URLPath: "/2020-12-08/ru-only/",
+			Tags: `["satoshi"]`, URLPath: "/2020-12-08/ru-only/",
+			// The tag and the category deliberately differ: `bitcoin` is a
+			// category with no corresponding tag anywhere in canonical, which is
+			// precisely the pairing that would break a consumer still deriving
+			// category from tags[0].
 			Category: "bitcoin",
 		})
 	}

@@ -241,7 +241,7 @@ func TestPaginationParamsAreRejected(t *testing.T) {
 	// wired up differently, it is this list that says so.
 	paths := []string{
 		"/api/events?lang=ru&",
-		"/api/events/tags/bitcoin?lang=ru&",
+		"/api/events/tags/satoshi?lang=ru&",
 		"/api/search?lang=ru&q=bitcoin&",
 	}
 
