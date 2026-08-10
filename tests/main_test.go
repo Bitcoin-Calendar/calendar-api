@@ -165,7 +165,8 @@ func seedArtifact(path, lang string) error {
 			"references" TEXT,
 			created_at datetime,
 			updated_at datetime,
-			url_path TEXT
+			url_path TEXT,
+			category TEXT
 		)`,
 		`CREATE INDEX idx_events_date ON events(date)`,
 		`CREATE UNIQUE INDEX idx_events_url_path ON events(url_path)`,
@@ -194,9 +195,9 @@ func seedArtifact(path, lang string) error {
 
 	for _, e := range fixtureRows(lang) {
 		if _, err := db.Exec(
-			`INSERT INTO events (id, date, title, description, media, tags, "references", created_at, updated_at, url_path)
-			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			e.ID, e.Date, e.Title, e.Description, e.Media, e.Tags, e.References, e.CreatedAt, e.UpdatedAt, e.URLPath,
+			`INSERT INTO events (id, date, title, description, media, tags, "references", created_at, updated_at, url_path, category)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			e.ID, e.Date, e.Title, e.Description, e.Media, e.Tags, e.References, e.CreatedAt, e.UpdatedAt, e.URLPath, e.Category,
 		); err != nil {
 			return err
 		}
@@ -217,6 +218,10 @@ type fixtureRow struct {
 	Media, References    *string
 	CreatedAt, UpdatedAt *string
 	Tags, URLPath        string
+	// Mandatory in canonical by validator invariant 13 — one value per row
+	// from a closed list of 14 — so every fixture row carries one, and each
+	// value below is a real member of that list rather than an invention.
+	Category string
 }
 
 func strptr(s string) *string { return &s }
@@ -237,6 +242,11 @@ func fixtureRows(lang string) []fixtureRow {
 			// Without a five-letter tag here, `_____` matches nothing whether or
 			// not the bug is present, and the test passes vacuously.
 			Tags: `["holiday", "prebitcoin", "price"]`, URLPath: "/1881-09-29/birthday-of-ludwig-von-mises/",
+			// Not `price`, though the row carries that tag: category is a single
+			// mandatory classification and tag order no longer implies it. A
+			// fixture whose category always matched tags[0] would let the very
+			// inference canonical retired keep passing its tests.
+			Category: "holiday",
 		},
 		{
 			ID: 2, Date: "2008-11-01",
@@ -246,6 +256,7 @@ func fixtureRows(lang string) []fixtureRow {
 			References:  strptr(`["https://bitcoin.org/bitcoin.pdf"]`),
 			CreatedAt:   strptr("2026-08-08 09:59:56"), UpdatedAt: strptr("2026-08-08 09:59:56"),
 			Tags: `["bitcoin", "mustread"]`, URLPath: "/2008-11-01/bitcoin-whitepaper-published/",
+			Category: "mustread",
 		},
 		{
 			ID: 3, Date: "2013-08-09",
@@ -254,6 +265,7 @@ func fixtureRows(lang string) []fixtureRow {
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
 			Tags: `["bitcoin", "archives", "bitcoin"]`, URLPath: "/2013-08-09/a-duplicated-tag-lives-here/",
+			Category: "archives",
 		},
 		{
 			// Shares 2008-11-01 with event 2, and exists only for that. The
@@ -272,6 +284,9 @@ func fixtureRows(lang string) []fixtureRow {
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
 			Tags: `["archives"]`, URLPath: "/2008-11-01/a-second-event-on-the-same-day/",
+			// Same tag as event 3 but a different category, so that nothing can
+			// pass by treating the two fields as interchangeable.
+			Category: "first",
 		},
 	}
 	if lang == "ru" {
@@ -282,6 +297,7 @@ func fixtureRows(lang string) []fixtureRow {
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
 			Tags: `["bitcoin"]`, URLPath: "/2020-12-08/ru-only/",
+			Category: "bitcoin",
 		})
 	}
 	return rows
@@ -419,6 +435,7 @@ type event struct {
 	Media       *string `json:"media"`
 	References  *string `json:"references"`
 	URLPath     string  `json:"url_path"`
+	Category    string  `json:"category"`
 	CreatedAt   *string `json:"created_at"`
 	UpdatedAt   *string `json:"updated_at"`
 }

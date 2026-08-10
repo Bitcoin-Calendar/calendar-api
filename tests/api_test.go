@@ -100,6 +100,13 @@ func TestEventContract(t *testing.T) {
 	if e.URLPath != "/1881-09-29/birthday-of-ludwig-von-mises/" {
 		t.Errorf("url_path: want the event's path, got %q", e.URLPath)
 	}
+	// The single mandatory classification, and what the website colours and
+	// filters by. Pinned to a value that is not this row's first tag, because
+	// consumers used to derive category from tags[0] and that inference is now
+	// wrong — a fixture where the two agreed would keep it looking correct.
+	if e.Category != "holiday" {
+		t.Errorf("category: want %q, got %q", "holiday", e.Category)
+	}
 	// Absence is null and only null — never "" and never "[]".
 	if e.Media != nil {
 		t.Errorf("media: want null, got %q", *e.Media)
