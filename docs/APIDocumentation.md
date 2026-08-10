@@ -104,27 +104,55 @@ client, because they have changed:
 
 ## Available Tags for Querying
 
-The following tags can be used with the `/events/tags/:tag` endpoint to find relevant events. Note that tag searching is case-insensitive.
+**`GET /api/tags` is the authoritative list.** It returns every tag in the requested language
+with its usage count, straight from the artifact, so it is correct by construction. Prefer it
+to anything written here: as of 2026-08-10 there are **192 distinct tags in each language**,
+and the selection below is an orientation aid, not a catalogue.
 
-*   `clownworld`: Content related to traditional finance, banking sector announcements and activities, mainstream media narratives, and so on.
-*   `cypherpunks`: Events, discussions, quotations, and news pertaining to the cypherpunk movement, including key figures like Satoshi Nakamoto, Hal Finney, David Chaum, and other early adopters, along with significant related activities.
-*   `quotes`: Direct quotations featured within the event descriptions.
-*   `bitcointalk`: Events or discussions from the BitcoinTalk forum.
-*   `ecash`: Content pertaining to DigiCash, e-cash, or similar digital cash systems.
-*   `lightning`: Events, developments, or discussions related to the Lightning Network or Lightning payments.
-*   `onchain`: Events and discussions concerning on-chain Bitcoin transactions.
-*   `obituaries`: Bitcoin obituaries events.
-*   `trading`: Content related to Bitcoin trading, market analysis, or price charts.
-*   `first`: Milestone events marking a 'first' occurrence in the Bitcoin ecosystem.
-*   `scam`: Incidents involving scams, financial losses, or theft within the Bitcoin space.
-*   `hack`: Incidents involving hacks or theft within the Bitcoin space.
-*   `mustread`: Important documents, articles and books deemed essential reading.
-*   `econ`: Discussions and events related to economic theories, principles, or impacts concerning Bitcoin.
-*   `privacy`: Content focusing on privacy aspects, technologies, or discussions within the Bitcoin context.
-*   `development`: Events related to Bitcoin Core releases, protocol upgrades, and technical proposals.
-*   `adoption`: Events highlighting instances of countries, governments, businesses, individuals, or organizations starting to accept or use Bitcoin.
-*   `legal`: For events involving lawsuits, regulations, and government legal actions.
-*   `media`: To specifically categorize mentions of Bitcoin in articles, TV shows, and other media.
+Tag matching on `/events/tags/:tag` is case-insensitive.
+
+> **If you hardcoded tags from an earlier version of this document, re-check them.** Three
+> entries listed here until 2026-08-10 match **nothing** in the data, and a tag with no events
+> is not an error — it is an empty list, indistinguishable from a tag that simply has no events
+> yet. Two of the three have live near-misses that make the mistake look like your typo:
+>
+> | Was documented | Status | Did you mean |
+> |---|---|---|
+> | `obituaries` | never existed | `obituary` |
+> | `econ` | never existed | `economics` |
+> | `clownworld` | retired from the data | — |
+>
+> Separately, **`bitcoin` is not a tag.** It was retired from every row and now exists only as
+> a `category`, so `/api/events/tags/bitcoin` returns an empty list. See the `category` field
+> above.
+
+The most-used tags, by event count as of 2026-08-10 (English; Russian is within a row or two):
+
+*   `cypherpunks` (118): the cypherpunk movement and its figures — Satoshi Nakamoto, Hal Finney, David Chaum and other early adopters.
+*   `first` (103): milestone events marking a first occurrence in the Bitcoin ecosystem.
+*   `archives` (97): material preserved from primary sources.
+*   `mustread` (66): documents, articles and books deemed essential reading.
+*   `legal` (62): lawsuits, regulations and government legal action.
+*   `privacy` (60): privacy aspects, technologies and discussions.
+*   `satoshi` (60): events concerning Satoshi Nakamoto specifically.
+*   `prebitcoin` (57): events before Bitcoin itself, including its intellectual ancestry.
+*   `security` (52): vulnerabilities, disclosures and defensive practice.
+*   `macro` (49): macroeconomic events and their bearing on Bitcoin.
+*   `obituary` (49): the Bitcoin obituaries.
+*   `software` (46): releases and client software.
+*   `scam` (40): scams, financial losses and theft.
+*   `development` (39): Bitcoin Core releases, protocol upgrades and technical proposals.
+*   `bitcointalk` (37): events and discussions from the BitcoinTalk forum.
+*   `mining` (36): mining, hardware and difficulty.
+*   `cryptography` (35): cryptographic primitives and research.
+*   `media` (32): mentions of Bitcoin in articles, TV and other media.
+*   `price` (27): price action and market milestones.
+*   `finney` (26): Hal Finney specifically.
+
+Also present and self-explanatory: `onchain`, `lightning`, `hack`, `ecash`, `holiday`,
+`trading`, `quotes`, `mtgox`, `silkroad`, `wikileaks`, `freedom`, `protocol`, `bip`,
+`halving`, `hashrate`, `economics`, `shitcoin`, `meme`, `szabo`, `salvador`, `adoption`, and
+roughly 170 more. Call `/api/tags` for the full set.
 
 ## Language Support
 
