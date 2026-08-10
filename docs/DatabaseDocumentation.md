@@ -62,9 +62,10 @@ Present in both database files, with identical definitions.
 **Do not treat that list, or its length, as fixed.** It has already changed twice: the column
 arrived on 2026-08-09 with fourteen values, and `security` was added on 2026-08-10, carved out
 of `bitcoin` (which fell 148→132 RU and 82→66 EN). Canonical owns this vocabulary. Anything
-here that needs the current set should read it from the artifact rather than carry a copy —
-which is also why a future `?category=` filter should derive its accepted values at boot
-instead of hardcoding them, or a fifteenth category would 400 until a new binary shipped.
+here that needs the current set should read it from the artifact rather than carry a copy.
+That is what the API does: `loadCategories` in `categories.go` runs one `SELECT DISTINCT` per
+artifact at startup, and `?category=` validates against the result. Had the list been compiled
+in, `security` would have been rejected as invalid until a new binary was built and deployed.
 
 It replaces an older convention in which consumers read the classification out of `tags[0]`;
 tag order no longer carries meaning and that inference is now wrong. `bitcoin` is the clearest

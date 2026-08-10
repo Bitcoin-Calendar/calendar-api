@@ -56,10 +56,11 @@ idle.
 
 The API provides the following main functionalities:
 
-*   **`/events`**: Retrieve a paginated list of all events, with powerful filtering by date (year, month, day, or combinations) and language.
+*   **`/events`**: Retrieve a paginated list of all events, with powerful filtering by date (year, month, day, or combinations), category, and language.
 *   **`/events/:id`**: Fetch a single event by its unique ID.
 *   **`/search`**: Perform a full-text search across event titles, descriptions, and tags.
 *   **`/tags`**: Get a list of all unique event tags and their usage counts.
+*   **`/categories`**: Get every category and its event count — what a client needs to build a category filter.
 *   **`/events/tags/:tag`**: Retrieve a paginated list of events associated with a specific tag.
 *   **`/health`**: Report which database artifact the service has open. **Not** under `/api`, and needs no API key.
 
@@ -192,7 +193,7 @@ Standard HTTP status codes are used. Common error responses include:
 
 ### Rejected input
 
-Three classes of input are answered `400` rather than being quietly absorbed, because in each
+Four classes of input are answered `400` rather than being quietly absorbed, because in each
 case the alternative response is indistinguishable from a legitimate result:
 
 **Date filters.** `month`, `day` and `year` must be plain integers in range (`1`–`12`,
@@ -211,6 +212,18 @@ page-size discipline: 1000 is above the corpus, so `limit=1000` legitimately ret
 event for a language in one response. It exists because without any bound `limit=100000` is
 accepted as readily as `limit=20`, and nothing in the response then says the endpoint is
 paginated at all.
+
+**Category.** `category` must be one the artifact actually carries. An unknown value is
+rejected with a message naming the accepted set, rather than returning `200` with an empty
+list — which would be indistinguishable from a category that genuinely has no events, so a
+client could not tell its own typo from a quiet corner of the corpus. Matching is
+case-insensitive.
+
+The accepted set is **read from the artifact when the service starts**, not compiled into the
+binary. That is deliberate: canonical owns this vocabulary and it grows — `security` was added
+on 2026-08-10 — and a hardcoded list would reject a valid new category until a new binary was
+built *and* deployed, turning a content edit into a code release. Call `/api/categories` for
+the current set.
 
 **Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
 (`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
@@ -239,6 +252,7 @@ Error responses will typically be in JSON format, like:
     *   `year` (optional, string, format: `YYYY` e.g., "2022"): Year for filtering events.
     *   `month` (optional, string, format: `MM` or `M` e.g., "05" or "5"): Month for filtering events.
     *   `day` (optional, string, format: `DD` or `D` e.g., "27" or "7"): Day for filtering events.
+    *   `category` (optional, string): Return only events with this category. Case-insensitive. **An unrecognised value is a `400`**, not an empty list — see *Rejected input*. Combines with the date filters (they AND together), so `?category=bitcoin&month=5` is "bitcoin events in May". Call `/api/categories` for the valid values and their counts; the service derives them from the artifact at startup, so a category canonical adds is accepted as soon as its data is published.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
@@ -406,19 +420,23 @@ Error responses will typically be in JSON format, like:
     *   **Body:**
         ```json
         {
-          "data": [ // Note: This endpoint's response structure was not specified as changed, keeping "data" wrapper for now.
+          "data": [
             {
               "tag": "adoption",
-              "count": 72
+              "count": 3
             },
             {
-              "tag": "bitcoin",
-              "count": 1
+              "tag": "archives",
+              "count": 97
             }
-            // ... more tags
+            // ... 190 more tags
           ]
         }
         ```
+
+    Counts are **events, not occurrences**: a row listing the same tag twice counts once, and
+    this number always equals `pagination.total` from `/events/tags/:tag`.
+
 *   **Example:**
     ```bash
     # Get English tags
@@ -428,7 +446,51 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/tags?lang=ru"
     ```
 
-### 5. Get Events by Tag (Paginated)
+### 5. Get All Categories
+
+*   **Endpoint:** `/categories`
+*   **Method:** `GET`
+*   **Description:** Every category present in the language's artifact, with the number of events carrying it, alphabetically. This is what a client needs to build a category filter without fetching every event to discover what exists — and it is the authoritative list, read from the data rather than from any document.
+*   **Query Parameters:**
+    *   `lang` (optional, string): Language for the categories. `en` for English (default), `ru` for Russian.
+*   **Request Body:** None
+*   **Success Response (200 OK):**
+    *   **Content-Type:** `application/json`
+    *   **Body:**
+        ```json
+        {
+          "data": [
+            {
+              "category": "archives",
+              "count": 83
+            },
+            {
+              "category": "bitcoin",
+              "count": 132
+            }
+            // ... more categories
+          ]
+        }
+        ```
+
+    Unlike `tags`, every event has **exactly one** category, so these counts sum to the total
+    number of events and always equal `pagination.total` from `/events?category=`.
+
+    The two languages carry the same set of category *names* but different counts, and they
+    disagree about the category of 62 of the 562 events they share by `url_path`. That is
+    catalogued upstream and is data, not a bug — a two-language filter will return genuinely
+    different sets for those events.
+
+*   **Example:**
+    ```bash
+    # Get English categories
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/categories?lang=en"
+
+    # Then filter by one
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?lang=en&category=bitcoin&limit=5"
+    ```
+
+### 6. Get Events by Tag (Paginated)
 
 *   **Endpoint:** `/events/tags/:tag`
 *   **Method:** `GET`
@@ -483,7 +545,7 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/tags/adoption?limit=2&lang=ru"
     ```
 
-### 6. Health
+### 7. Health
 
 *   **Endpoint:** `/health` — note this is at the root, **not** under `/api`
 *   **Method:** `GET`
