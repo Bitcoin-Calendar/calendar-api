@@ -72,14 +72,21 @@ func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 // page URL. The Telegram bot already reads it.
 //
 // Category is the single mandatory classification, one value per row from a
-// closed list of 14, and it is what the website colours and filters by. It is a
-// plain string rather than a pointer on purpose: absence is a validator failure
+// closed set, and it is what the website colours and filters by. It is a plain
+// string rather than a pointer on purpose: absence is a validator failure
 // upstream, not a state this API should be able to represent. Note that the
-// closed list is enforced by validate.py invariant 13 and not by the DDL — the
+// closed set is enforced by validate.py invariant 13 and not by the DDL — the
 // column is declared TEXT with notnull=0 — so the data is clean because the
 // publisher checks it, not because the database would refuse otherwise.
 // Measured 2026-08-10 across both artifacts: 0 NULL, 0 empty, 0 values outside
-// the 14, in 1,146 rows.
+// the set, in 1,146 rows.
+//
+// Deliberately not an enum, and no list of permitted values anywhere in this
+// package: canonical owns the vocabulary and it grows. It shipped on 2026-08-09
+// with fourteen values and gained `security` the next day. A validating type
+// here would have to be rebuilt and redeployed to accept a value the data
+// already contains — so this field carries whatever the artifact holds, and
+// anything that genuinely needs the current set reads it from the artifact.
 //
 // Consumers used to derive this from tags[0]. That inference is now wrong: tag
 // order carries no meaning, and `bitcoin` is a category value with no

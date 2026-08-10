@@ -71,12 +71,14 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     timestamp. Rendering those as `"0001-01-01T00:00:00Z"` would be inventing data.
 *   **`url_path`** (`/2013-08-09/hal-finneys-last-post/`) is the cross-language join key and
     the website's page URL. It is present on every row.
-*   **`category` is not `tags[0]`.** Every event has exactly one `category`, from a closed list
-    of 14, and it is what the website colours and filters by. Consumers used to derive it from
-    the first tag; tag order carries no meaning now and that inference is wrong. `bitcoin` is
-    the sharp edge: it is a category on 148 RU and 82 EN events and **no longer a tag on any**,
-    so `/api/events/tags/bitcoin` returns an empty list. There is no `?category=` filter yet —
-    fetch and filter client-side, or ask for one.
+*   **`category` is not `tags[0]`.** Every event has exactly one `category`, and it is what the
+    website colours and filters by. Consumers used to derive it from the first tag; tag order
+    carries no meaning now and that inference is wrong. `bitcoin` is the sharp edge: it is a
+    category on 132 RU and 66 EN events and **no longer a tag on any**, so
+    `/api/events/tags/bitcoin` returns an empty list. The set of categories is closed but
+    **owned by the data and liable to grow** — `security` appeared a day after the column did —
+    so accept unrecognised values rather than hardcoding the list. There is no `?category=`
+    filter yet: fetch and filter client-side, or ask for one.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
     returns a list.
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on

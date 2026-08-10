@@ -218,9 +218,12 @@ type fixtureRow struct {
 	Media, References    *string
 	CreatedAt, UpdatedAt *string
 	Tags, URLPath        string
-	// Mandatory in canonical by validator invariant 13 — one value per row
-	// from a closed list of 14 — so every fixture row carries one, and each
-	// value below is a real member of that list rather than an invention.
+	// Mandatory in canonical by validator invariant 13 — one value per row from
+	// a closed set — so every fixture row carries one, and each value below is a
+	// real member of that set rather than an invention. The set is owned by the
+	// data and grows (it gained `security` on 2026-08-10), so nothing here
+	// asserts its size; TestFixtureSchemaMatchesCanonical compares columns, not
+	// values, for exactly that reason.
 	Category string
 }
 

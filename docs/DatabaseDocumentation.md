@@ -53,14 +53,23 @@ Present in both database files, with identical definitions.
 | `created_at`  | `datetime`    |               | Row bookkeeping. `NULL` on most rows. |
 | `updated_at`  | `datetime`    |               | Row bookkeeping. `NULL` on most rows. |
 | `url_path`    | `TEXT`        | `UNIQUE` index | `/<date>/<slug>/`. The website's page path and the cross-language join key. |
-| `category`    | `TEXT`        | none in the DDL | The event's single classification, from a closed list of 14. Added to canonical 2026-08-09. **Mandatory by validator invariant 13, not by the schema** — the column is declared `notnull=0`, so the data is clean because the publisher checks it, not because SQLite would refuse otherwise. Measured 2026-08-10 across both artifacts: 0 `NULL`, 0 `''`, 0 values outside the 14, in 1,146 rows. |
+| `category`    | `TEXT`        | none in the DDL | The event's single classification, from a closed set owned by canonical. Added 2026-08-09. **Mandatory by validator invariant 13, not by the schema** — the column is declared `notnull=0`, so the data is clean because the publisher checks it, not because SQLite would refuse otherwise. Measured 2026-08-10 across both artifacts: 0 `NULL`, 0 `''`, 0 values outside the set, 0 not lowercase/trimmed, in 1,146 rows. |
 
-**On `category`.** The 14 values are `archives`, `bitcoin`, `first`, `holiday`, `legal`,
-`lightning`, `macro`, `mining`, `mustread`, `obituary`, `price`, `privacy`, `scam`,
-`software`. It replaces an older convention in which consumers read the classification out of
-`tags[0]`; tag order no longer carries meaning and that inference is now wrong. `bitcoin` is
-the clearest case — it exists as a category (148 RU, 82 EN) and **no longer exists as a tag at
-all**, so a hard-coded `tag=bitcoin` query returns zero rows.
+**On `category`.** As of 2026-08-10 the values are `archives`, `bitcoin`, `first`, `holiday`,
+`legal`, `lightning`, `macro`, `mining`, `mustread`, `obituary`, `price`, `privacy`, `scam`,
+`security`, `software` — identical sets in both languages.
+
+**Do not treat that list, or its length, as fixed.** It has already changed twice: the column
+arrived on 2026-08-09 with fourteen values, and `security` was added on 2026-08-10, carved out
+of `bitcoin` (which fell 148→132 RU and 82→66 EN). Canonical owns this vocabulary. Anything
+here that needs the current set should read it from the artifact rather than carry a copy —
+which is also why a future `?category=` filter should derive its accepted values at boot
+instead of hardcoding them, or a fifteenth category would 400 until a new binary shipped.
+
+It replaces an older convention in which consumers read the classification out of `tags[0]`;
+tag order no longer carries meaning and that inference is now wrong. `bitcoin` is the clearest
+case — it exists as a category (132 RU, 66 EN) and **no longer exists as a tag at all**, so a
+hard-coded `tag=bitcoin` query returns zero rows.
 
 The two languages disagree about the category of 62 of the 500 events they share by
 `url_path`. That is catalogued in canonical's README and is data, not a bug — but a
