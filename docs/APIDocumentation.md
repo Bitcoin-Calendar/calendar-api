@@ -67,8 +67,10 @@ Detailed information for each endpoint is provided below.
 
 ## The event object
 
-Every endpoint that returns events returns objects of this shape. Four points are worth
-reading before writing a client, because all four have changed:
+Every endpoint that returns events returns objects of this shape — including `/search`, which
+until 2026-08-10 silently omitted `category`, `created_at` and `updated_at` because it
+enumerates its columns by hand. Several fields below are worth reading before writing a
+client, because they have changed:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -80,6 +82,7 @@ reading before writing a client, because all four have changed:
 | `media` | string \| null | A JSON array encoded as a string, or `null` when the event has no media. Never `""` and never `"[]"` — absence is exactly one value. |
 | `references` | string \| null | Same encoding and same null rule as `media`. |
 | `url_path` | string | `/<date>/<slug>/`, e.g. `"/2013-08-09/hal-finneys-last-post/"`. The site's page path and the cross-language join key. **Note the leading slash** — joining it onto a base URL with another `/` yields a double slash. |
+| `category` | string | The event's single classification, from a closed list of 14: `archives`, `bitcoin`, `first`, `holiday`, `legal`, `lightning`, `macro`, `mining`, `mustread`, `obituary`, `price`, `privacy`, `scam`, `software`. Always present and never empty. **Do not derive it from `tags[0]`** — that inference used to work and is now wrong, because tag order carries no meaning. In particular `bitcoin` is a category with no corresponding tag left in the data at all, so `/api/events/tags/bitcoin` returns nothing while 148 RU and 82 EN events are `category: "bitcoin"`. |
 | `created_at` | string \| null | RFC 3339, or `null`. Bookkeeping about the row, not about the event; most rows have no value. |
 | `updated_at` | string \| null | Same. |
 
@@ -93,6 +96,7 @@ reading before writing a client, because all four have changed:
   "media": "[\"https://i.nostr.build/dwoR3.png\"]",
   "references": "[\"https://web.archive.org/web/20240207194838/https://bitcointalk.org/...\"]",
   "url_path": "/2013-08-09/hal-finneys-last-post/",
+  "category": "archives",
   "created_at": null,
   "updated_at": null
 }
@@ -223,6 +227,7 @@ Error responses will typically be in JSON format, like:
               "media": null,
               "references": "[\"https://bitcoin.org/bitcoin.pdf\"]",
               "url_path": "/2008-11-01/bitcoin-whitepaper-published/",
+              "category": "mustread",
               "created_at": null,
               "updated_at": null
             }
@@ -336,6 +341,7 @@ Error responses will typically be in JSON format, like:
             "media": null,
             "references": "[\"https://bitcoin.org/bitcoin.pdf\"]",
             "url_path": "/2008-11-01/bitcoin-whitepaper-published/",
+            "category": "mustread",
             "created_at": null,
             "updated_at": null
           }
@@ -421,6 +427,7 @@ Error responses will typically be in JSON format, like:
               "media": "[\"https://example.com/pizza.webp\"]",
               "references": "[\"https://bitcointalk.org/...\"]",
               "url_path": "/2010-05-22/bitcoin-pizza-day/",
+              "category": "bitcoin",
               "created_at": "2026-08-08T09:59:56Z",
               "updated_at": "2026-08-08T09:59:56Z"
             }
