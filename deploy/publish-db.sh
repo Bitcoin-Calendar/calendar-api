@@ -9,6 +9,7 @@
 #   local  preflight  checksums + validate.py + scoped git state
 #   remote stage      copy into releases/<ts>.incoming, verify, permission, rename
 #   remote validate   run validate.py against the STAGED copy, not just the source
+#   local  schema     the API's own test, against the staged copy — see below
 #   remote flip       symlink, then restart (mandatory — see below)
 #   remote verify     /health hashes, FTS coverage, and a vocabulary assertion
 #   remote prune      keep the last N releases
@@ -27,12 +28,25 @@
 # sidecar or flips the WAL header byte after validation already passed. The
 # second run is against the bytes that will actually be served.
 #
+# The schema guard is why this script knows about `go test`. validate.py checks
+# that the data is internally consistent; it has no opinion about whether this
+# API can express it. Canonical gained a mandatory `category` column on
+# 2026-08-09, the Event struct did not, and the column shipped inside the
+# artifact and reached no response — with validate.py passing and `make test`
+# green throughout, because the suite's own fixture had no such column either.
+# TestFixtureSchemaMatchesCanonical compares the fixture's schema against a real
+# artifact, so pointing it at the staged copy turns "someone notices the schema
+# changed" into a check that fires at the one moment a schema change is expected
+# to be reviewed: release. It runs before the flip, so a failure costs nothing —
+# the running service is untouched.
+#
 # Usage:
 #   ./publish-db.sh                    # publish, with a confirmation prompt
 #   ./publish-db.sh --dry-run          # every check, no staging, no flip
 #   ./publish-db.sh --yes              # no prompt (for a future cron/CI caller)
 #   ./publish-db.sh --keep 10
 #   ./publish-db.sh --source /path/to/calendar/dbs --host root@example
+#   ./publish-db.sh --allow-schema-drift   # publish data the API cannot yet emit
 #
 set -euo pipefail
 
@@ -47,6 +61,11 @@ API_URL="http://127.0.0.1:3000/api"
 KEEP=5
 DRY_RUN=0
 ASSUME_YES=0
+ALLOW_SCHEMA_DRIFT=0
+
+# The repo this script lives in, so the schema guard can find the Go suite
+# regardless of where it was invoked from.
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 DBS=(events_ru.db events_en.db)
 
@@ -55,10 +74,19 @@ DBS=(events_ru.db events_en.db)
 # printed loudly, because a *drop to zero* means the FTS tokenizer stopped
 # handling that script, which nothing else in this script would catch.
 # Cyrillic is the one that actually exercises the tokenizer.
+#
+# Both numbers were re-measured against release 20260810T131954Z on 2026-08-10
+# and both had drifted. EN fell 450 -> 389 because the `bitcoin` tag was retired
+# in canonical: events_fts indexes the tags column, so removing the tag from
+# ~76% of rows removed those matches. `bitcoin` survives as a category value,
+# which the FTS index does not cover. RU fell 246 -> 244 with ordinary edits.
+# The previous release printed the warning below exactly as designed and the
+# constants were simply never updated — which is the failure mode this comment
+# exists to make harder.
 VOCAB_RU_TERM="биткоин"
 VOCAB_EN_TERM="bitcoin"
-VOCAB_RU_LAST=246
-VOCAB_EN_LAST=450
+VOCAB_RU_LAST=244
+VOCAB_EN_LAST=389
 
 # --- argument parsing -------------------------------------------------------
 
@@ -69,7 +97,8 @@ while [ $# -gt 0 ]; do
 	--keep) KEEP="$2"; shift 2 ;;
 	--dry-run) DRY_RUN=1; shift ;;
 	--yes | -y) ASSUME_YES=1; shift ;;
-	-h | --help) sed -n '2,40p' "$0"; exit 0 ;;
+	--allow-schema-drift) ALLOW_SCHEMA_DRIFT=1; shift ;;
+	-h | --help) sed -n '2,49p' "$0"; exit 0 ;;
 	*) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
 	esac
 done
@@ -326,6 +355,74 @@ fi
 remote "rm -rf '$REMOTE_TMP'"
 printf '%s\n' "$STAGED_OUT" | sed 's/^/       /'
 ok "validate.py: PASS on the staged artifact"
+
+# ---------------------------------------------------------------------------
+# 5b. Schema guard — can this API actually express what is being published?
+# ---------------------------------------------------------------------------
+# validate.py answers "is this data sound"; this answers "can the service emit
+# it". They are different questions and the second one had no owner, which is
+# how a mandatory column shipped into production and reached no response.
+#
+# Pulled back rather than checked in place: the box has no Go toolchain and no
+# source tree, and it should stay that way. The file that comes back is the one
+# that will be served, so the copy is the point rather than an inconvenience.
+
+step "Schema guard (the API's own test, against the staged copy)"
+
+schema_guard_failed=0
+if ! command -v go >/dev/null 2>&1; then
+	if [ "$ALLOW_SCHEMA_DRIFT" -eq 1 ]; then
+		warn "go not found; skipping the schema guard because --allow-schema-drift was given"
+	else
+		die "go not found on PATH, so the schema guard cannot run.
+       This check is what stops a new canonical column shipping into an API that
+       cannot emit it. Install Go, or re-run with --allow-schema-drift if you
+       have decided to publish data ahead of the service."
+	fi
+elif [ ! -d "$REPO_ROOT/tests" ]; then
+	warn "no tests/ directory under $REPO_ROOT; skipping the schema guard"
+else
+	SCHEMA_TMP=$(mktemp -d "${TMPDIR:-/tmp}/bitcal-schema.XXXXXX")
+	trap 'rm -rf "$SCHEMA_TMP"; close_ssh' EXIT
+
+	for db in "${DBS[@]}"; do
+		scp -q "${SSH_OPTS[@]}" "$SSH_HOST:$TARGET/$db" "$SCHEMA_TMP/$db" \
+			|| die "could not fetch $db back from the staged release for the schema check"
+
+		# Column sets must match; column *order* legitimately differs between
+		# the two languages, so the test compares by name and both files are
+		# expected to pass.
+		if GUARD_OUT=$(cd "$REPO_ROOT" && BITCAL_CANONICAL_DB="$SCHEMA_TMP/$db" \
+			CGO_ENABLED=1 go test -tags fts5 -count=1 \
+			-run TestFixtureSchemaMatchesCanonical ./tests 2>&1); then
+			ok "$db: schema matches what the API models"
+		else
+			printf '%s\n' "$GUARD_OUT" | sed 's/^/       /'
+			schema_guard_failed=1
+		fi
+	done
+	rm -rf "$SCHEMA_TMP"
+	trap close_ssh EXIT
+fi
+
+if [ "$schema_guard_failed" -eq 1 ]; then
+	if [ "$ALLOW_SCHEMA_DRIFT" -eq 1 ]; then
+		warn "the staged artifact's schema does not match the API's model, and"
+		warn "--allow-schema-drift was given — publishing anyway. The columns"
+		warn "named above will ship inside the artifact and reach no response."
+	else
+		die "the staged artifact's schema does not match what this API models.
+       Nothing was flipped and the running service is untouched; the release
+       directory is at $TARGET.
+
+       This is the check working. Add the column to Event in database.go and to
+       the fixture in tests/main_test.go, let TestEventStructCoversEveryColumn
+       tell you what else to fix, ship the binary, then publish again.
+
+       If you have decided to publish the data first and update the API after,
+       re-run with --allow-schema-drift."
+	fi
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Flip and restart
