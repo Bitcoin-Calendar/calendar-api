@@ -72,7 +72,7 @@ tag order no longer carries meaning and that inference is now wrong. `bitcoin` i
 case — it exists as a category (132 RU, 66 EN) and **no longer exists as a tag at all**, so a
 hard-coded `tag=bitcoin` query returns zero rows.
 
-The two languages disagree about the category of 62 of the 500 events they share by
+The two languages disagree about the category of 62 of the 562 events they share by
 `url_path`. That is catalogued in canonical's README and is data, not a bug — but a
 two-language filter built on this column will return genuinely different sets.
 
@@ -107,7 +107,7 @@ read-only and **cannot create the index**; that would be a change to canonical.
 ## Full-text search: `events_fts`
 
 Both databases carry an FTS5 index and its three triggers. **Both are fully populated**
-(RU 582/582, EN 565/565).
+(RU 581/581, EN 565/565).
 
 ```sql
 CREATE VIRTUAL TABLE events_fts USING fts5(
