@@ -116,7 +116,7 @@ These are the parts that are not guessable from the endpoint list. Each was a re
   "version": "0.1.0-dd9c9dd",
   "databases": {
     "ru": {
-      "path": "/srv/bitcal/data/releases/20260810T131954Z/events_ru.db",
+      "path": "/srv/bitcal/data/releases/20260810T191227Z/events_ru.db",
       "sha256": "12a5f040…",
       "rows": 581,
       "fts": { "indexed": 581, "consistent": true },

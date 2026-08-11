@@ -576,14 +576,14 @@ Error responses will typically be in JSON format, like:
       "version": "0.1.0-abc1234",
       "databases": {
         "en": {
-          "path": "/srv/bitcal/data/releases/20260810T131954Z/events_en.db",
+          "path": "/srv/bitcal/data/releases/20260810T191227Z/events_en.db",
           "sha256": "6abda1c576b81220538b35d2d697064ac5a0ea72ecc6772d9c58832cdcf8f80e",
           "rows": 565,
           "fts": { "indexed": 565, "consistent": true },
           "categories": { "present": true, "count": 15 }
         },
         "ru": {
-          "path": "/srv/bitcal/data/releases/20260810T131954Z/events_ru.db",
+          "path": "/srv/bitcal/data/releases/20260810T191227Z/events_ru.db",
           "sha256": "12a5f04093e31ceb0a34cf44b60f4d5758869c96e990bb5b840ac3f983b45ba4",
           "rows": 581,
           "fts": { "indexed": 581, "consistent": true },
