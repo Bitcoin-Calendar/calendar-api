@@ -326,7 +326,19 @@ func getCategoriesHandler(c *fiber.Ctx) error {
 
 	zlog.Info().Str("lang", lang).Msg("getCategoriesHandler called")
 
-	var result []CategoryInfo
+	// An artifact predating the category column has nothing to report, and the
+	// statement below would fail against it with `no such column`. Answering the
+	// empty list is the truth — this artifact carries no categories — and a 500
+	// on an endpoint the service can perfectly well answer is not.
+	if !categoriesByLang[resolveLang(lang)].present {
+		return c.JSON(fiber.Map{"data": []CategoryInfo{}})
+	}
+
+	// Initialised, not declared nil, for the reason ftsSearchHandler spells out:
+	// Raw().Scan() leaves the slice nil when nothing matches and a nil slice
+	// marshals to JSON null, so a caller would get null from one branch of this
+	// handler and [] from the other.
+	result := []CategoryInfo{}
 	// NOTHING MAY FOLLOW THE FINAL SEMICOLON — see getTagsHandler for what a
 	// trailing comment does to this driver. It is not a style rule.
 	sqlQuery := `
@@ -543,7 +555,7 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 		// the one belonging to the artifact this request will actually read.
 		vocab := categoriesByLang[resolveLang(lang)]
 		if !vocab.known(want) {
-			return badParam(c, "category", categoryStr, "one of: "+vocab.list())
+			return badParam(c, "category", categoryStr, vocab.expected())
 		}
 		// LOWER on the column, not a bare equality: the closed set is enforced
 		// by the publisher rather than by the schema, so this must not depend
@@ -633,7 +645,25 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		return queryFailed(c, err, "Failed to count search results")
 	}
 
-	searchSQL := `
+	// The one column in the list below that an artifact may genuinely not have.
+	// A release predating 2026-08-09 has no `category`, and those files are
+	// rollback targets — so naming it unconditionally makes every search on a
+	// rolled-back artifact answer 500, which is the outage the boot path was
+	// just taught not to cause. Every other handler adapts for free: GORM builds
+	// its SELECT from the struct against the table it can see, and only this
+	// statement enumerates by hand.
+	//
+	// Spliced rather than parameterised because a column name is not a bind
+	// parameter. The value is one of two literals decided here, never anything a
+	// caller sent. Sprintf is safe on this statement specifically because it
+	// contains no other %% verb; anything added below that needs one must escape
+	// it or this stops being a formatting string.
+	categoryCol := " e.category,"
+	if !categoriesByLang[resolveLang(lang)].present {
+		categoryCol = ""
+	}
+
+	searchSQL := fmt.Sprintf(`
 		-- "references" is a SQL reserved word: unquoted, SQLite refuses to
 		-- parse the statement and every search returns 500.
 		--
@@ -652,7 +682,7 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		-- exist. Exposing rank as JSON would be a new contract decision: the
 		-- value is FTS5-internal, negative, and incomparable across queries.
 		SELECT e.id, e.date, e.title, e.description, e.tags, e.media, e."references",
-		       e.url_path, e.category, e.created_at, e.updated_at
+		       e.url_path,%s e.created_at, e.updated_at
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
 		WHERE events_fts MATCH ?
@@ -662,7 +692,7 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		-- event twice and never shown another.
 		ORDER BY fts.rank, e.id DESC
 		LIMIT ? OFFSET ?;
-	`
+	`, categoryCol)
 	if err := db.Raw(searchSQL, query, limit, offset).Scan(&events).Error; err != nil {
 		if isFTSSyntaxError(err) {
 			return badSearchQuery(c, query, lang, err)
@@ -745,12 +775,23 @@ func main() {
 	// Read from the artifacts rather than compiled in, so a category canonical
 	// adds works as soon as its data is published rather than after a rebuild
 	// and a deploy. See loadCategories.
+	//
+	// An artifact predating the column is not fatal — it is a rollback target,
+	// and refusing to start against one turns a rollback into an outage. It is
+	// logged at warn because it does degrade the service, and only ?category=
+	// and /api/categories are affected.
 	for lang, db := range map[string]*gorm.DB{"en": DB_EN, "ru": DB_RU} {
 		set, err := loadCategories(db)
 		if err != nil {
 			zlog.Fatal().Str("lang", lang).Err(err).Msg("Failed to read the category vocabulary")
 		}
 		categoriesByLang[lang] = set
+		if !set.present {
+			zlog.Warn().Str("lang", lang).
+				Msg("This artifact has no category column: it predates 2026-08-09. " +
+					"?category= will be rejected and /api/categories will be empty")
+			continue
+		}
 		zlog.Info().Str("lang", lang).Int("categories", len(set.sorted)).Msg("Category vocabulary loaded")
 	}
 

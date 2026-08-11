@@ -219,13 +219,36 @@ type fixtureRow struct {
 	CreatedAt, UpdatedAt *string
 	Tags, URLPath        string
 	// Mandatory in canonical by validator invariant 13 — one value per row from
-	// a closed set — so every fixture row carries one, and each value below is a
-	// real member of that set rather than an invention. The set is owned by the
+	// a closed set — so every fixture row carries one. The set is owned by the
 	// data and grows (it gained `security` on 2026-08-10), so nothing here
 	// asserts its size; TestFixtureSchemaMatchesCanonical compares columns, not
 	// values, for exactly that reason.
+	//
+	// Every value below is a real member of that set except one, event 5's, and
+	// that exception is the whole point: see syntheticCategory.
 	Category string
 }
+
+// syntheticCategory is deliberately NOT a member of canonical's vocabulary, and
+// it is the only assertion in this suite that can tell the boot-derived
+// vocabulary apart from a hardcoded list.
+//
+// Every other fixture category — holiday, mustread, archives, bitcoin — is a
+// real canonical value, so a compiled-in list would contain all of them and
+// accept all of them. Replacing loadCategories with such a list was measured
+// against this suite before this row existed: `go vet` clean, every test green.
+// The design the filter exists for was pinned by nothing.
+//
+// So one row carries a value no hardcoded list could ever hold. The filter
+// accepts it only if the vocabulary really was read out of the artifact at boot,
+// which is what TestVocabularyComesFromTheArtifactNotTheBinary asserts.
+//
+// This is the same trade the duplicated-tag row (event 3) makes: a fixture
+// deliberately harsher than production, because a test that cannot fail reads
+// like coverage while providing none. It is safe here for the same reason the
+// filter is written the way it is — nothing in the service carries a list of
+// permitted values to disagree with.
+const syntheticCategory = "not-a-canonical-category"
 
 func strptr(s string) *string { return &s }
 
@@ -300,8 +323,10 @@ func fixtureRows(lang string) []fixtureRow {
 			CreatedAt: nil, UpdatedAt: nil,
 			Tags: `["archives"]`, URLPath: "/2008-11-01/a-second-event-on-the-same-day/",
 			// Same tag as event 3 but a different category, so that nothing can
-			// pass by treating the two fields as interchangeable.
-			Category: "first",
+			// pass by treating the two fields as interchangeable — and the one
+			// value in this fixture that canonical does not carry, so that the
+			// vocabulary's origin is provable. See syntheticCategory.
+			Category: syntheticCategory,
 		},
 	}
 	if lang == "ru" {

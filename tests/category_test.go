@@ -1,9 +1,14 @@
 package tests
 
 import (
+	"database/sql"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
 
 type categoryInfo struct {
@@ -11,14 +16,37 @@ type categoryInfo struct {
 	Count    int    `json:"count"`
 }
 
+// getFrom is getAs against a service other than the suite's own, for the tests
+// that boot an instance on a deliberately odd artifact.
+func getFrom(t *testing.T, base, path string, into interface{}) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("X-API-KEY", apiKey)
+
+	res, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer res.Body.Close()
+	if into != nil && strings.Contains(res.Header.Get("Content-Type"), "application/json") {
+		_ = json.NewDecoder(res.Body).Decode(into)
+	} else {
+		_, _ = io.Copy(io.Discard, res.Body)
+	}
+	return res.StatusCode
+}
+
 // TestCategoryFilter covers the filter's happy path against the fixture, whose
 // categories are deliberately not equal to any row's first tag — a filter that
 // accidentally matched on tags would pass a fixture where the two agreed.
 func TestCategoryFilter(t *testing.T) {
-	// Fixture categories, RU: holiday(1), mustread(1), archives(1), first(1),
-	// bitcoin(1). `bitcoin` is the important one: it is a category carried by a
-	// row whose tags do not include it, which is the exact shape canonical has
-	// after the tag was retired.
+	// Fixture categories, RU: holiday(1), mustread(1), archives(1), bitcoin(1),
+	// and syntheticCategory(1). `bitcoin` is the important one: it is a category
+	// carried by a row whose tags do not include it, which is the exact shape
+	// canonical has after the tag was retired.
 	for _, tc := range []struct {
 		category string
 		want     int
@@ -26,7 +54,7 @@ func TestCategoryFilter(t *testing.T) {
 		{"holiday", 1},
 		{"archives", 1},
 		{"bitcoin", 1},
-		{"first", 1},
+		{syntheticCategory, 1},
 	} {
 		t.Run(tc.category, func(t *testing.T) {
 			var list eventList
@@ -193,11 +221,99 @@ func TestCategoriesEndpoint(t *testing.T) {
 	}
 }
 
+// TestVocabularyComesFromTheArtifactNotTheBinary is the one assertion that can
+// distinguish this service's design — read the vocabulary out of the artifact at
+// boot — from the compiled-in list it was written to avoid.
+//
+// Nothing else here can. Every other fixture category is a real canonical value,
+// so a hardcoded list contains them all and every other test in this file passes
+// against it; that was measured, not assumed. `syntheticCategory` is a value no
+// such list could hold, so the filter accepts it only if loadCategories really
+// did read the artifact.
+//
+// This is the 2026-08-10 scenario in miniature: canonical added `security` a day
+// after the column shipped, and a binary carrying its own list would have
+// answered 400 to a category the data already contained until someone built and
+// deployed a new one.
+func TestVocabularyComesFromTheArtifactNotTheBinary(t *testing.T) {
+	var list eventList
+	code := getAs(t, apiKey2, "/api/events?lang=ru&category="+url.QueryEscape(syntheticCategory), &list)
+	if code != http.StatusOK {
+		t.Fatalf("category=%q answered %d. The fixture carries this value, so the only way "+
+			"to reject it is to validate against a vocabulary that did not come from the "+
+			"artifact — which is the design this test exists to pin.", syntheticCategory, code)
+	}
+	// Without this the test would pass against a filter that accepts everything
+	// and matches nothing, which is the failure mode ?category= exists to avoid.
+	if list.Pagination.Total != 1 {
+		t.Errorf("category=%q: want 1 event, got %d — the fixture row carrying it is gone, "+
+			"and with it the only proof that the vocabulary is read from the data",
+			syntheticCategory, list.Pagination.Total)
+	}
+
+	// The endpoint must report it too, or a client could never discover it.
+	var body struct {
+		Data []categoryInfo `json:"data"`
+	}
+	if code := getAs(t, apiKey2, "/api/categories?lang=ru", &body); code != http.StatusOK {
+		t.Fatalf("/api/categories: want 200, got %d", code)
+	}
+	for _, ci := range body.Data {
+		if ci.Category == syntheticCategory {
+			return
+		}
+	}
+	t.Errorf("/api/categories does not report %q, though the artifact carries it; the "+
+		"endpoint is not reading the same data the filter validates against", syntheticCategory)
+}
+
+// TestCategoryVocabularyIsPerArtifact pins that each language validates against
+// its own file rather than a set shared between them.
+//
+// `bitcoin` is carried by RU fixture event 4 and by no EN row, so it must be a
+// valid filter in one language and a 400 in the other. In production the two
+// artifacts happen to carry identical category *names*, which is exactly why
+// this cannot be left to canonical to demonstrate — the day they diverge is the
+// day a shared vocabulary starts answering 200 with an empty list.
+//
+// It is also the assertion that fails if the two languages' vocabularies are
+// ever loaded into the wrong slots, which the RU-superset fixture would
+// otherwise hide in one direction.
+func TestCategoryVocabularyIsPerArtifact(t *testing.T) {
+	var ru eventList
+	if code := getAs(t, apiKey2, "/api/events?lang=ru&category=bitcoin", &ru); code != http.StatusOK {
+		t.Fatalf("lang=ru category=bitcoin: want 200, got %d", code)
+	}
+	if ru.Pagination.Total == 0 {
+		t.Fatal("no ru event carries the bitcoin category; the fixture no longer models the " +
+			"asymmetry this test needs")
+	}
+
+	// The same value against the artifact that does not carry it.
+	for _, lang := range []string{"en", "xx"} {
+		t.Run("lang="+lang, func(t *testing.T) {
+			var body struct {
+				Error string `json:"error"`
+			}
+			code := getAs(t, apiKey2, "/api/events?lang="+lang+"&category=bitcoin", &body)
+			if code != http.StatusBadRequest {
+				t.Errorf("lang=%s category=bitcoin: want 400, got %d — no english row carries "+
+					"that category, so a 200 here means the filter validated against the "+
+					"wrong artifact's vocabulary (xx falls back to english)", lang, code)
+			}
+		})
+	}
+}
+
 // TestEveryCategoryInTheDataIsAccepted closes the loop the boot-derived
 // vocabulary exists for: whatever the artifact carries must be a valid filter
-// value. A hardcoded list would drift from the data and fail exactly here —
-// which is what would have happened on 2026-08-10, when canonical added
-// `security` a day after the column shipped.
+// value.
+//
+// On its own this asserts only that two reads of the same artifact agree, which
+// a hardcoded list satisfies just as well — TestVocabularyComesFromTheArtifact-
+// NotTheBinary is what actually pins the design. This one still earns its place
+// by covering every value rather than one, so a filter that accepted only part
+// of the vocabulary would fail here.
 func TestEveryCategoryInTheDataIsAccepted(t *testing.T) {
 	var body struct {
 		Data []categoryInfo `json:"data"`
@@ -240,5 +356,89 @@ func TestCategoriesAreLanguageSpecific(t *testing.T) {
 		if c.Category == "bitcoin" {
 			t.Error("en reports a bitcoin category; that row exists only in the ru fixture")
 		}
+	}
+}
+
+// TestServiceBootsWithoutACategoryColumn is a regression test for a boot failure
+// that only an old artifact could trigger, which is precisely why nothing caught
+// it: every fixture and every current release carries the column.
+//
+// `category` arrived on 2026-08-09. Every release before that has no such
+// column, and those files are still on the box as rollback targets —
+// publish-db.sh's rollback() re-points `current` at the previous release and
+// restarts the service. Reading the vocabulary at boot made a missing column a
+// fatal error, so this binary refused to start against any of them: a rollback
+// became an outage, and a binary deploy silently required an artifact of at
+// least a given age. Confirmed against a real superseded artifact — the pre-PR
+// binary served it, this one exited with `no such column: category`.
+//
+// So the service must boot, keep answering everything that does not depend on
+// the column, and refuse only the filter it genuinely cannot answer.
+func TestServiceBootsWithoutACategoryColumn(t *testing.T) {
+	dir := stageArtifact(t, func(db *sql.DB) error {
+		_, err := db.Exec(`ALTER TABLE events DROP COLUMN category`)
+		return err
+	})
+
+	base, serviceLog, startErr := bootService(t, dir)
+	if startErr != nil {
+		t.Fatalf("the service refused to start against an artifact predating the category "+
+			"column. That artifact is a rollback target, and everything except ?category= "+
+			"works perfectly well on it: %v\n--- log ---\n%s", startErr, serviceLog)
+	}
+	if !strings.Contains(serviceLog, "no category column") {
+		t.Errorf("the service degraded silently; nothing in its log says the artifact has no "+
+			"category column:\n%s", serviceLog)
+	}
+
+	// Everything not keyed on the column still works.
+	var list eventList
+	if code := getFrom(t, base, "/api/events?lang=ru&limit=100", &list); code != http.StatusOK {
+		t.Fatalf("/api/events: want 200, got %d", code)
+	}
+	if list.Pagination.Total != 5 {
+		t.Errorf("/api/events total: want 5, got %d", list.Pagination.Total)
+	}
+
+	// Search especially. It is the one handler that enumerates its columns by
+	// hand instead of letting GORM derive them, so it is the one that names
+	// e.category into a table that has none — and it answered 500 to every query
+	// while the rest of the service was fine. Booting and then failing every
+	// search is not a rollback that worked.
+	var found eventList
+	if code := getFrom(t, base, "/api/search?lang=ru&q=satoshi&limit=100", &found); code != http.StatusOK {
+		t.Errorf("/api/search: want 200, got %d — the hand-written SELECT in "+
+			"ftsSearchHandler still names a column this artifact does not have", code)
+	}
+	if len(found.Events) == 0 {
+		t.Error("/api/search returned nothing for a term the fixture carries; a 200 with an " +
+			"empty list is the failure this would otherwise hide")
+	}
+
+	// The filter cannot be answered, so it must be refused — not answered 200
+	// with an empty list, which is the whole reason ?category= validates at all.
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if code := getFrom(t, base, "/api/events?lang=ru&category=bitcoin", &errBody); code != http.StatusBadRequest {
+		t.Errorf("?category= against an artifact with no category column: want 400, got %d. "+
+			"200 would be an empty list indistinguishable from a real one, and 500 would "+
+			"be a server error for a question the server can answer", code)
+	}
+	if !strings.Contains(errBody.Error, "category") {
+		t.Errorf("the rejection does not explain itself: %q", errBody.Error)
+	}
+
+	// And the discovery endpoint reports an empty list rather than failing, or
+	// returning the JSON null a nil slice marshals to.
+	var raw struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if code := getFrom(t, base, "/api/categories?lang=ru", &raw); code != http.StatusOK {
+		t.Fatalf("/api/categories: want 200, got %d", code)
+	}
+	if string(raw.Data) != "[]" {
+		t.Errorf("/api/categories: want an empty array, got %s — null is what a nil slice "+
+			"marshals to, and a caller has to special-case it", raw.Data)
 	}
 }
