@@ -83,7 +83,7 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     It is a filter on `/api/events` **only** — sending it to `/api/search` or
     `/api/events/tags/:tag` is a `400` too, rather than a `200` full of unfiltered results.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
-    returns a list.
+    returns a list — and so is `data` on `/api/tags` and `/api/categories`. Never `null`.
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on
     a typo being caught.
 *   **`/api/tags` returns its list under `data`**, not `tags`.
