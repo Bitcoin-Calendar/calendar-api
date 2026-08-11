@@ -8,14 +8,43 @@
 # changes, and keeping them separate is what makes each one reviewable.
 #
 #   local  preflight  clean tree, HEAD pushed, make test, version string
-#   remote preflight  toolchain, and a /health snapshot to roll back to
+#   remote preflight  toolchain, the checks' own tooling, and a /health snapshot
+#                     to roll back to
 #   remote build      git archive HEAD -> temp dir on the box, build, make test
 #   remote install    back up the running binary, then rename the new one over it
 #   remote restart    systemctl restart (mandatory — the binary is running)
 #   remote verify     /health: the version moved and the DATA DID NOT
 #   remote prune      keep the last N .bak binaries
 #
-# Any failure after the install rolls back to the previous binary automatically.
+# What happens when something fails after the install depends on what failed,
+# and the distinction is the point:
+#
+#   the binary is bad           roll back, automatically. A process that will
+#                               not stay up, a /health reporting a version that
+#                               is not the one just installed, data that moved
+#                               under a deploy that ships no data, a search that
+#                               matches nothing — the artifact is the problem.
+#   the *check* could not run   do not roll back. An unreachable box or a
+#                               missing jq says nothing about the binary, and
+#                               reverting an install that may be perfectly good
+#                               because the checker broke is the wrong trade.
+#                               The script exits non-zero saying the binary is
+#                               live and unverified, and prints the commands to
+#                               check or undo it by hand.
+#
+# It cannot promise more than that: rolling back needs SSH too, so a box that
+# has gone away cannot be rolled back to anything by this or any other script.
+# What it does promise is that it never exits quietly. Preflight checks the
+# tooling the later steps depend on — jq, an API key, a service already
+# answering /health — before anything is built, so the second case is rare: a
+# missing jq is a property of the box, not something that appears halfway
+# through a deploy.
+#
+# The window that makes this worth the care is between the install and the
+# restart. The box holds the new binary on disk with the old one still running,
+# so an exit there leaves a mismatch that the next restart for any reason
+# promotes — a binary nothing ever verified. That is why the install, not the
+# restart, is the point of no return below.
 #
 # This is a transcription, not an invention. The procedure below was walked by
 # hand twice on 2026-08-09 — bitcal-api.bak-20260809T160545Z and the binary that
@@ -74,6 +103,10 @@ ASSUME_YES=0
 ALLOW_DIRTY=0
 VERSION=""
 
+# Read from the box during preflight, and empty when it could not be read — in
+# which case the search assertion is skipped rather than guessed at.
+API_KEY=""
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # --- argument parsing -------------------------------------------------------
@@ -86,7 +119,10 @@ while [ $# -gt 0 ]; do
 	--dry-run) DRY_RUN=1; shift ;;
 	--yes | -y) ASSUME_YES=1; shift ;;
 	--allow-dirty) ALLOW_DIRTY=1; shift ;;
-	-h | --help) sed -n '2,58p' "$0"; exit 0 ;;
+	# Every comment line after the shebang, stopping at the first line of code.
+	# A hardcoded line range silently truncates the help the next time the
+	# header grows, which is exactly what happened to it before.
+	-h | --help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
 	*) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
 	esac
 done
@@ -207,8 +243,38 @@ remote "test -x '$REMOTE_GO/go'" \
 	|| die "no Go toolchain at $REMOTE_GO/go on the box.
        The build happens there on purpose (CGO/glibc); see the header. Install
        Go, or build locally with 'make build-ubuntu' and install by hand."
-REMOTE_GO_VERSION=$(remote "$REMOTE_GO/go version")
+if ! REMOTE_GO_VERSION=$(remote "$REMOTE_GO/go version"); then
+	die "lost the box while reading the Go version. Nothing has been built or
+       installed; the running binary is untouched."
+fi
 ok "toolchain: $REMOTE_GO_VERSION"
+
+# Everything the verify step needs, proved before anything is built.
+#
+# These are properties of the box, not of the binary: jq either is installed or
+# is not, and the key either is readable or is not, and neither changes halfway
+# through a deploy. Discovering them here costs nothing — nothing has been
+# built, nothing has been installed — and the operator gets "install jq on the
+# box" instead of an installed binary that gets rolled back because the check
+# that judges it could not run.
+remote "command -v jq >/dev/null 2>&1" \
+	|| die "jq is not installed on $SSH_HOST, and the search assertion at the end of this
+       script needs it. Install it (apt-get install -y jq) and re-run. Installing
+       without it would mean replacing the running binary and then discovering
+       that the new one cannot be verified."
+ok "jq present, the search assertion can parse a reply"
+
+# Read here rather than after the install, for the same reason. It is also the
+# one remote read whose failure is otherwise indistinguishable from an empty
+# file: a `sed` that found nothing and an ssh that never ran both yield "".
+if ! API_KEY=$(remote "sed -n 's/^API_KEYS=//p' /etc/bitcal/api.env | cut -d, -f1"); then
+	API_KEY=""
+fi
+if [ -z "$API_KEY" ]; then
+	warn "could not read an API key from /etc/bitcal/api.env; the search assertion will be skipped"
+else
+	ok "api key readable, search assertion will run"
+fi
 
 # The baseline. Everything after the install is judged against this, and the
 # data half of it is the assertion that matters most: a binary deploy must not
@@ -269,7 +335,10 @@ fi
 
 step "Building $VERSION on the box"
 
-REMOTE_BUILD=$(remote "mktemp -d /tmp/bitcal-build.XXXXXX")
+if ! REMOTE_BUILD=$(remote "mktemp -d /tmp/bitcal-build.XXXXXX"); then
+	die "could not make a build directory on the box. Nothing has been installed;
+       the running binary is untouched."
+fi
 
 # git archive rather than rsync: exactly the committed tree, no .git, no build
 # artefacts, no editor droppings.
@@ -298,10 +367,19 @@ ok "make test: PASS on the box"
 # for, before it replaces a working binary. This is the check that catches the
 # `0.1.0-unknown` failure: the exported tree has no .git, so a VERSION that
 # failed to reach the Makefile shows up here rather than in /health afterwards.
-BUILT_VERSION=$(remote "'$REMOTE_BUILD/$BINARY' --version 2>/dev/null || true")
+# The `|| true` inside each command string is the box's, not ours: it absorbs a
+# binary with no --version flag and a grep that matches nothing. An ssh that
+# never ran is a different thing and is not absorbed — hence the `if !`.
+if ! BUILT_VERSION=$(remote "'$REMOTE_BUILD/$BINARY' --version 2>/dev/null || true"); then
+	die "lost the box while checking the version inside the freshly built binary.
+       Nothing has been installed; the running binary is untouched."
+fi
 if [ -z "$BUILT_VERSION" ]; then
 	# The binary has no --version flag today; fall back to the string table.
-	BUILT_VERSION=$(remote "strings '$REMOTE_BUILD/$BINARY' | grep -Fx '$VERSION' | head -1 || true")
+	if ! BUILT_VERSION=$(remote "strings '$REMOTE_BUILD/$BINARY' | grep -Fx '$VERSION' | head -1 || true"); then
+		die "lost the box while reading the version string out of the built binary.
+       Nothing has been installed; the running binary is untouched."
+	fi
 fi
 if [ -n "$BUILT_VERSION" ]; then
 	ok "the built binary carries $VERSION"
@@ -334,6 +412,31 @@ ok "installed $REMOTE_API/$BINARY (root:root 0755)"
 # 6. Restart
 # ---------------------------------------------------------------------------
 
+# The two commands an operator needs when this script stops being able to speak
+# for the box: how to undo the install, and how to look at what is running. The
+# success path ends by printing them, and the "could not verify" path prints the
+# same two — one wording, so the instructions cannot drift apart.
+manual_commands() {
+	printf '    roll back by hand: ssh %s \"cp -p %s %s/%s && systemctl restart %s\"\n' \
+		"$SSH_HOST" "$BACKUP" "$REMOTE_API" "$BINARY" "$SERVICE"
+	printf '    verify by hand:    ssh %s \"curl -s %s | jq .\"\n' "$SSH_HOST" "$HEALTH_URL"
+}
+
+# Every remote read from here to the end of the script is written as
+# `if ! VAR=$(remote …)`. A bare `VAR=$(remote …)` takes the exit status of the
+# command substitution, so under `set -e` an unreachable box stops the script
+# dead between the install and any rollback — no message, no rollback, exit 255,
+# and a box left holding a new binary on disk with the old one still running.
+# Inside an `if` condition the assignment is exempt from `set -e` and the
+# failure can be answered.
+#
+# There is deliberately no `trap … ERR` doing this centrally. It would not fire
+# for any of these sites, because ERR traps do not fire inside `if` conditions
+# or `&&`/`||` chains, which is where every one of them now lives; it would add
+# a second, invisible path into rollback, which is the most destructive thing
+# this script does; and it would need its own guard against rolling back twice
+# when a `die` path has already done it. Explicit at each site is longer and
+# reviewable.
 rollback() {
 	printf '\n%s==> Rolling back to %s%s\n' "$BOLD" "$BEFORE_VERSION" "$OFF"
 	remote "cp -p '$BACKUP' '$REMOTE_API/$BINARY.rollback' \
@@ -366,7 +469,20 @@ step "Restarting"
 # Same NRestarts trick as publish-db.sh: a manual restart does not increment it,
 # so any increase afterwards means systemd is restarting a process that keeps
 # dying, and the failure is reported in seconds rather than at the timeout.
-RESTARTS_BEFORE=$(remote "systemctl show $SERVICE -p NRestarts --value 2>/dev/null || echo 0")
+if ! RESTARTS_BEFORE=$(remote "systemctl show $SERVICE -p NRestarts --value 2>/dev/null || echo 0"); then
+	# The new binary is on disk but nothing has restarted, so the running
+	# process still holds the old inode and callers are unaffected. Putting the
+	# backup back is cheap and leaves the box consistent — and leaving it is
+	# not: a binary nobody verified would be promoted by the next restart for
+	# any reason at all. Carrying on with a guessed baseline is no better, since
+	# a wrong NRestarts turns the poll below into a false CRASHLOOP verdict,
+	# which rolls back anyway — with a worse story.
+	warn "could not read NRestarts from the box"
+	rollback
+	die "lost the box immediately after installing the new binary; the install was
+       undone. Nothing had restarted, so the old binary was still the one
+       serving."
+fi
 
 remote "systemctl restart $SERVICE" || { rollback; die "restart failed"; }
 
@@ -416,7 +532,16 @@ ok "healthy after ${ELAPSED}s"
 
 step "Verifying"
 
-AFTER_HEALTH=$(remote "curl -s --max-time 10 $HEALTH_URL")
+if ! AFTER_HEALTH=$(remote "curl -s --max-time 10 $HEALTH_URL"); then
+	# Unlike the search probe below, this one does roll back. /health answered
+	# seconds ago — the wait loop above will not leave this block otherwise — so
+	# a failure now is the process going away after coming up, not a checker
+	# that was never able to run.
+	warn "the service stopped answering $HEALTH_URL after reporting healthy"
+	rollback
+	die "the new binary came up and then stopped answering. It was rolled back;
+       the rejected binary is not kept, but the build it came from is $VERSION."
+fi
 
 if ! VERIFY_OUT=$(python3 - "$VERSION" "$BEFORE_HEALTH" "$AFTER_HEALTH" <<'PY'
 import json, sys
@@ -494,21 +619,80 @@ printf '%s\n' "$VERIFY_OUT" | while IFS= read -r line; do [ -n "$line" ] && ok "
 # cannot exist (fts5_required.go refuses to compile), so this is defence in
 # depth rather than a gap — but it is the assertion that would catch a driver
 # or artifact problem that only appears under a query.
-API_KEY=$(remote "sed -n 's/^API_KEYS=//p' /etc/bitcal/api.env | cut -d, -f1")
-if [ -n "$API_KEY" ]; then
-	SEARCH_TOTAL=$(remote "curl -s --max-time 10 -H 'X-API-KEY: $API_KEY' --get \
+#
+# Two failures live here and they are kept apart, because they deserve opposite
+# answers. A term that matches nothing is an answer, and a damning one: this
+# binary cannot serve search, and it comes back out. A probe that never produced
+# an answer at all — the box unreachable, jq gone, curl dead — is evidence about
+# the box, not about the binary, and reverting an install that may be perfectly
+# good because the checker broke would be the wrong trade. That one exits
+# non-zero with the binary left running and the commands to finish by hand.
+#
+# Both used to be the same flag: `[ "${SEARCH_TOTAL:-0}" -gt 0 ]` defaulted an
+# empty result to 0 and fell into the else branch, and a non-numeric result made
+# `[` itself error into the same else branch — so a missing jq or an unreachable
+# box rolled back a binary that may have been fine.
+#
+# Only one probe runs today, so only one of the two flags can be set; the shape
+# is the reference implementation's in publish-db.sh, and it stays correct if a
+# second term is ever added here.
+if [ -z "$API_KEY" ]; then
+	# Reported at preflight, before anything was built. Repeated here so the
+	# absence of the assertion is visible in the deploy output too.
+	warn "no API key was readable at preflight; skipping the search assertion"
+else
+	search_failed=0
+	probe_broken=0
+	if ! SEARCH_TOTAL=$(remote "curl -s --max-time 10 -H 'X-API-KEY: $API_KEY' --get \
 		--data-urlencode 'q=биткоин' --data-urlencode 'lang=ru' \
-		'http://127.0.0.1:3000/api/search' | jq -r '.pagination.total // 0'")
-	if [ "${SEARCH_TOTAL:-0}" -gt 0 ]; then
-		ok "search works through the new binary (ru 'биткоин' -> $SEARCH_TOTAL)"
+		'http://127.0.0.1:3000/api/search' | jq -r '.pagination.total // 0'"); then
+		warn "could not reach the box to run the search probe"
+		probe_broken=1
 	else
-		warn "search returned nothing through the new binary — check the fts5 build tag"
+		case "$SEARCH_TOTAL" in
+		'' | *[!0-9]*)
+			# ssh worked and the answer is unusable: jq missing (preflight says
+			# it was there, so it went away mid-deploy), curl failing inside the
+			# remote pipeline, or /api/search answering something that is not
+			# JSON. Same bucket as an unreachable box — we never got an answer.
+			warn "the search probe returned no usable total (got '$SEARCH_TOTAL')"
+			probe_broken=1
+			;;
+		0)
+			warn "search returned nothing through the new binary — check the fts5 build tag"
+			search_failed=1
+			;;
+		*)
+			ok "search works through the new binary (ru 'биткоин' -> $SEARCH_TOTAL)"
+			;;
+		esac
+	fi
+
+	# A proven-broken search outranks a broken probe.
+	if [ "$search_failed" -eq 1 ]; then
 		remote "journalctl -u $SERVICE -n 25 --no-pager" 2>/dev/null | sed 's/^/       /' || true
 		rollback
 		die "the new binary cannot serve search; rolled back."
 	fi
-else
-	warn "could not read an API key from /etc/bitcal/api.env; skipping the search assertion"
+
+	if [ "$probe_broken" -eq 1 ]; then
+		warn "the binary is LIVE and the search assertion never ran against it"
+		printf '\n%serror%s %s\n' "$RED" "$OFF" "could not run the search assertion — the binary was NOT rolled back.
+       Everything /health can prove about $VERSION passed; only the end-to-end
+       search check is missing, and rolling back a binary on the strength of a
+       broken checker would be worse than leaving it up unverified.
+
+       Check it by hand once the box is reachable (the key is the first entry
+       in /etc/bitcal/api.env):
+
+         ssh $SSH_HOST \"curl -s -H 'X-API-KEY: <key>' --get \\
+           --data-urlencode 'q=биткоин' --data-urlencode 'lang=ru' \\
+           'http://127.0.0.1:3000/api/search' | jq .pagination.total\"
+
+       If it answers 0, undo the install with the command below." >&2
+		manual_commands >&2
+		exit 1
+	fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -517,7 +701,13 @@ fi
 
 step "Pruning old binaries (keeping $KEEP)"
 
-PRUNED=$(remote "bash -s" -- "$REMOTE_API" "$BINARY" "$KEEP" <<'REMOTE'
+# Housekeeping, after a deploy that has already passed every assertion. A
+# failure here is not grounds to touch the binary that is serving: old .bak
+# files left on disk are a disk-space problem, not a serving problem. It is
+# still said out loud, because the whole point of pruning is that nobody
+# watches disk usage.
+PRUNED=""
+if ! PRUNED=$(remote "bash -s" -- "$REMOTE_API" "$BINARY" "$KEEP" <<'REMOTE'
 set -euo pipefail
 dir="$1"; binary="$2"; keep="$3"
 cd "$dir" || exit 0
@@ -529,19 +719,26 @@ for f in "${all[@]:0:$((count - keep))}"; do
 	rm -f "$dir/$f" && echo "$f"
 done
 REMOTE
-)
-if [ -n "$PRUNED" ]; then
+); then
+	warn "pruning failed; old .bak binaries are still on the box and will need clearing by hand:"
+	warn "  ssh $SSH_HOST 'ls -1 $REMOTE_API/$BINARY.bak-*'"
+	warn "the binary itself is installed and verified — this does not affect what is served"
+	PRUNED=""
+elif [ -n "$PRUNED" ]; then
 	printf '%s\n' "$PRUNED" | sed 's/^/       removed /'
 else
 	ok "nothing to prune"
 fi
 
-REMAINING=$(remote "ls -1 $REMOTE_API/$BINARY.bak-* 2>/dev/null | wc -l | tr -d ' '")
+# Cosmetic, and the last thing this script does. A box that becomes unreachable
+# between the prune and here has not affected a binary that is already live and
+# already verified, so this reports what it knows rather than exiting on it.
+if ! REMAINING=$(remote "ls -1 $REMOTE_API/$BINARY.bak-* 2>/dev/null | wc -l | tr -d ' '"); then
+	REMAINING="an unknown number of"
+fi
 
 # ---------------------------------------------------------------------------
 
 step "Published $VERSION"
 printf '    %s previous binaries retained, rollback target %s\n' "$REMAINING" "$(basename "$BACKUP")"
-printf '    roll back by hand: ssh %s \"cp -p %s %s/%s && systemctl restart %s\"\n' \
-	"$SSH_HOST" "$BACKUP" "$REMOTE_API" "$BINARY" "$SERVICE"
-printf '    verify by hand:    ssh %s \"curl -s %s | jq .\"\n' "$SSH_HOST" "$HEALTH_URL"
+manual_commands
