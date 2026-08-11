@@ -225,6 +225,11 @@ on 2026-08-10 — and a hardcoded list would reject a valid new category until a
 built *and* deployed, turning a content edit into a code release. Call `/api/categories` for
 the current set.
 
+If the artifact being served has no categories at all — it predates the column, or no row
+carries a value — then **every** `category` value is rejected and `/api/categories` is empty.
+The message says which of the two it is. Nothing can match in either case, so the alternative
+would again be a `200` and an empty list.
+
 **Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
 (`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
 person can reasonably type into a search box, so they are client errors, not server errors.

@@ -101,13 +101,12 @@ func loadCategories(db *gorm.DB) (categorySet, error) {
 		return categorySet{}, fmt.Errorf("reading the category vocabulary: %w", err)
 	}
 
-	// The column exists but carries nothing on any row. That is not a rollback
-	// target, it is an upstream failure of validator invariant 13, and the
-	// handler treats an empty set as "no vocabulary to validate against" and
-	// lets the filter through — which means ?category=anything answers 200 with
-	// an empty list. Left as it was, but note that it is now the only route to
-	// that behaviour: the case this permissiveness was written for, an artifact
-	// predating the column, is handled above and no longer arrives here.
+	// The column may exist and carry nothing on any row. That is not a rollback
+	// target — it is an upstream failure of validator invariant 13 — and it is
+	// still not a reason to refuse to boot: every other endpoint answers
+	// correctly, exactly as on an artifact predating the column. known() rejects
+	// every value in that state, so the filter says so rather than answering 200
+	// with an empty list. The caller is told at warn during boot.
 	set := categorySet{present: true, members: make(map[string]bool, len(values)), sorted: values}
 	for _, v := range values {
 		set.members[v] = true
@@ -117,17 +116,17 @@ func loadCategories(db *gorm.DB) (categorySet, error) {
 
 // known reports whether a category exists in this artifact.
 //
-// An artifact with no category column knows nothing, so every value is
-// rejected: no row can match a column that is not there, and the alternative is
-// the empty list that ?category= exists to avoid. An empty vocabulary on an
-// artifact that does have the column accepts everything: see loadCategories.
+// An artifact with nothing to check against rejects every value, and there are
+// two ways to have nothing: no `category` column at all, or a column no row
+// carries a value in. Both leave members empty, and in both no row can match, so
+// letting the filter through would answer 200 with an empty list — the outcome
+// ?category= validates in order to avoid.
+//
+// An empty vocabulary used to be accepted instead, on the reasoning that there
+// was no vocabulary to validate against. That was written when a missing column
+// was the case that reached here; it is handled separately now, and all the
+// permissiveness did was leave one route back to the silent empty result.
 func (c categorySet) known(v string) bool {
-	if !c.present {
-		return false
-	}
-	if len(c.members) == 0 {
-		return true
-	}
 	return c.members[v]
 }
 
@@ -136,8 +135,8 @@ func (c categorySet) expected() string {
 	if !c.present {
 		return "nothing: this artifact predates the category column, so no value can match"
 	}
-	// Unreachable while known() lets an empty vocabulary through, and kept
-	// anyway so that changing that decision does not also need a message.
+	// The column is there but no row carries a value. known() rejects
+	// everything in that state, so this is what such a caller is told.
 	if len(c.sorted) == 0 {
 		return "nothing: this artifact carries no categories"
 	}
