@@ -117,6 +117,65 @@ func TestUnknownCategoryIsRejected(t *testing.T) {
 	}
 }
 
+// TestCategoryIsRejectedWhereItIsNotAFilter covers the two endpoints that return
+// events and do not filter by category.
+//
+// Both accepted the parameter and ignored it: &category=bitcoin on a search
+// answered 200 with every match, and nothing in that response distinguishes it
+// from a filter that ran. That is the silent empty result's mirror image — a
+// silent *unfiltered* result — and the same argument applies, so the parameter
+// is refused where it does nothing.
+//
+// The controls matter here: without them a handler that rejected every request
+// would pass.
+func TestCategoryIsRejectedWhereItIsNotAFilter(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ok       string // must answer 200 and return events
+		rejected string // the same request with a category appended
+	}{
+		{
+			name:     "search",
+			ok:       "/api/search?lang=ru&q=satoshi",
+			rejected: "/api/search?lang=ru&q=satoshi&category=bitcoin",
+		},
+		{
+			name:     "events by tag",
+			ok:       "/api/events/tags/satoshi?lang=ru",
+			rejected: "/api/events/tags/satoshi?lang=ru&category=bitcoin",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var list eventList
+			if code := getAs(t, apiKey3, tc.ok, &list); code != http.StatusOK {
+				t.Fatalf("%s: want 200, got %d", tc.ok, code)
+			}
+			if len(list.Events) == 0 {
+				t.Fatalf("%s returned no events, so the rejection below proves nothing", tc.ok)
+			}
+
+			var body struct {
+				Error string `json:"error"`
+			}
+			code := getAs(t, apiKey3, tc.rejected, &body)
+			if code != http.StatusBadRequest {
+				t.Fatalf("%s: want 400, got %d — the parameter is not honoured here, and "+
+					"answering 200 leaves the caller unable to tell that their filter was "+
+					"dropped", tc.rejected, code)
+			}
+			// `bitcoin` is a real category in the ru artifact, so this is not a
+			// vocabulary rejection wearing the wrong coat: the endpoint has to
+			// refuse the parameter itself.
+			if !strings.Contains(body.Error, "category") {
+				t.Errorf("the rejection does not name the parameter: %q", body.Error)
+			}
+			if !strings.Contains(body.Error, "/api/events") {
+				t.Errorf("the rejection does not say where the filter does work: %q", body.Error)
+			}
+		})
+	}
+}
+
 // TestUnknownLangStillValidatesCategory is a regression test for a bug that
 // survived the first round of these tests because every one of them named a
 // real language.
