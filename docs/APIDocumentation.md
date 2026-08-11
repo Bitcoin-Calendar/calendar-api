@@ -472,11 +472,11 @@ Error responses will typically be in JSON format, like:
           "data": [
             {
               "category": "archives",
-              "count": 83
+              "count": 89
             },
             {
               "category": "bitcoin",
-              "count": 132
+              "count": 66
             }
             // ... more categories
           ]
