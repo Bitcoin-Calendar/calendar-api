@@ -89,6 +89,38 @@ func TestUnknownCategoryIsRejected(t *testing.T) {
 	}
 }
 
+// TestUnknownLangStillValidatesCategory is a regression test for a bug that
+// survived the first round of these tests because every one of them named a
+// real language.
+//
+// An unrecognised lang silently serves English — documented, and deliberate.
+// But the filter validated against categoriesByLang[<raw lang>], so `lang=xx`
+// found no vocabulary, treated "no vocabulary" as "nothing to check", and
+// answered 200 with an empty list for a category that does not exist. One
+// spelling of one parameter reopened the silent-empty-result hole the 400 was
+// added to close, which is a good argument for testing the fallback path of
+// anything keyed by a caller-supplied value.
+func TestUnknownLangStillValidatesCategory(t *testing.T) {
+	for _, lang := range []string{"xx", "EN", "de", ""} {
+		t.Run("lang="+lang, func(t *testing.T) {
+			var body struct {
+				Error string `json:"error"`
+			}
+			code := getAs(t, apiKey2, "/api/events?lang="+lang+"&category=nonesuch", &body)
+			if code != http.StatusBadRequest {
+				t.Errorf("lang=%q category=nonesuch: want 400, got %d — an unknown category "+
+					"must be rejected whatever language the caller named", lang, code)
+			}
+		})
+	}
+
+	// The other half: the fallback must still accept what English carries.
+	var list eventList
+	if code := getAs(t, apiKey2, "/api/events?lang=xx&category=mustread", &list); code != http.StatusOK {
+		t.Errorf("lang=xx category=mustread: want 200, got %d", code)
+	}
+}
+
 // TestCategoryFilterIsCaseInsensitive matches the documented behaviour of the
 // tag filter, so the two do not disagree about how a caller may spell things.
 func TestCategoryFilterIsCaseInsensitive(t *testing.T) {
