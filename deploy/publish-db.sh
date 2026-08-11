@@ -123,7 +123,11 @@ while [ $# -gt 0 ]; do
 	--dry-run) DRY_RUN=1; shift ;;
 	--yes | -y) ASSUME_YES=1; shift ;;
 	--allow-schema-drift) ALLOW_SCHEMA_DRIFT=1; shift ;;
-	-h | --help) sed -n '2,49p' "$0"; exit 0 ;;
+	# Every comment line after the shebang, stopping at the first line of code.
+	# A hardcoded line range silently truncates the help the next time the
+	# header grows, which is what happened when the header was rewritten and
+	# this kept printing only as far as the old line 49.
+	-h | --help) awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
 	*) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
 	esac
 done
@@ -274,6 +278,7 @@ remote "command -v jq >/dev/null 2>&1" \
        script needs it. Install it (apt-get install -y jq) and re-run. Publishing
        without it would mean flipping the symlink and then discovering that the
        release cannot be verified."
+ok "jq present, the search assertion can parse a reply"
 
 # Only when something is already being served. On a first publish there is
 # nothing to answer, and requiring it would make the script unable to bootstrap.
