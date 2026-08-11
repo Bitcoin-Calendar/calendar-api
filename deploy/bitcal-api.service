@@ -31,12 +31,16 @@
 #        D=$(ssh root@host "mktemp -d /tmp/bitcal-build.XXXXXX")
 #        git archive --format=tar HEAD | ssh root@host "tar -x -C $D"
 #        ssh root@host "cd $D && PATH=/usr/local/go/bin:\$PATH \
-#                       make build VERSION=0.1.0-\$(git rev-parse --short HEAD)"
+#                       make build VERSION=0.1.0-$(git rev-parse --short HEAD)"
 #
 #      Pass VERSION explicitly. The exported tree has no .git, so the
 #      Makefile's `git rev-parse` fallback yields 0.1.0-unknown — and you find
-#      out from /health afterwards. Go is at /usr/local/go/bin and is not on
-#      root's PATH.
+#      out from /health afterwards. The $( ) around rev-parse is deliberately
+#      NOT escaped, unlike the \$PATH beside it: it must expand on your
+#      machine, where .git exists. Escaped, it runs in the exported tree on
+#      the box and names the version `0.1.0-` — a variant of exactly the
+#      failure this paragraph is about. Go is at /usr/local/go/bin and is not
+#      on root's PATH.
 #
 #   2. Run `make test` in that directory, on the box. The suite is black-box —
 #      it builds the binary, stages a fixture at 0444 in a 0555 directory and
