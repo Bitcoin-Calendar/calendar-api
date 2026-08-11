@@ -80,6 +80,8 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     liable to grow** — `security` appeared a day after the column did — so accept unrecognised
     values rather than hardcoding the list. The service derives the accepted values from the
     artifact at startup for that reason; an unknown category is a `400`, not an empty list.
+    It is a filter on `/api/events` **only** — sending it to `/api/search` or
+    `/api/events/tags/:tag` is a `400` too, rather than a `200` full of unfiltered results.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
     returns a list.
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on

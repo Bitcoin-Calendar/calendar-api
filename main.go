@@ -112,6 +112,41 @@ func badParam(c *fiber.Ctx, name, got, want string) error {
 	})
 }
 
+// categoryParamRejected refuses ?category= on an endpoint that does not filter
+// by it, and reports whether it answered the request — the same shape as
+// pagination(), and for the same reason: c.JSON returns nil on success, so a
+// helper that returned its error would look like it had refused while the
+// handler carried on and overwrote the body under a 400 status line.
+//
+// Only /api/events honours the parameter. The other two endpoints that return
+// events accepted it and ignored it: a client narrowing a search with
+// &category=bitcoin got every match, with a 200 and nothing anywhere in the
+// response to say the filter had not been applied. That is the same silence the
+// 400 on an unknown category exists to break, arrived at from the other side.
+//
+// This deliberately does not become a rule about unknown parameters in general.
+// A stray ?foo= carries no expectation that anything will happen; `category` is
+// a real parameter of this API with a documented meaning, so sending it *is* the
+// expectation. Rejecting it here is also the compatible direction: a later
+// release that implements the filter turns these 400s into 200s, while a client
+// written against today's silent pass-through would have to be corrected.
+func categoryParamRejected(c *fiber.Ctx) bool {
+	got := c.Query("category")
+	if got == "" {
+		return false
+	}
+	zlog.Warn().Str("param", "category").Str("got", got).Str("path", c.Path()).
+		Msg("rejected a query parameter this endpoint does not honour")
+	// The route pattern rather than c.Path(), so /api/events/tags/:tag names
+	// itself instead of echoing whichever tag the caller happened to ask for.
+	c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error": fmt.Sprintf(
+			"category is not a filter on %s, so it is refused rather than ignored. "+
+				"Only /api/events supports ?category=", c.Route().Path),
+	})
+	return true
+}
+
 // eventOrder is the sort every paginated list endpoint uses: newest first, with
 // id breaking ties.
 //
@@ -437,6 +472,12 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 		})
 	}
 
+	// The tag filter does not compose with the category filter. See
+	// categoryParamRejected.
+	if categoryParamRejected(c) {
+		return nil
+	}
+
 	page, limit, ok := pagination(c)
 	if !ok {
 		return nil
@@ -600,6 +641,11 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 
 	if query == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Search query is required"})
+	}
+
+	// Search does not narrow by category. See categoryParamRejected.
+	if categoryParamRejected(c) {
+		return nil
 	}
 
 	page, limit, ok := pagination(c)

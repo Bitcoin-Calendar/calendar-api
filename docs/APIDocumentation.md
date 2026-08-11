@@ -230,6 +230,10 @@ carries a value — then **every** `category` value is rejected and `/api/catego
 The message says which of the two it is. Nothing can match in either case, so the alternative
 would again be a `200` and an empty list.
 
+`category` is a filter on `/events` only. Sending it to `/search` or `/events/tags/:tag` is a
+`400` rather than being quietly dropped: those endpoints do not narrow by category, and a
+`200` full of unfiltered results is indistinguishable from a filter that ran.
+
 **Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
 (`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
 person can reasonably type into a search box, so they are client errors, not server errors.
@@ -333,6 +337,7 @@ Error responses will typically be in JSON format, like:
     *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
     *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
+    *   `category`: **not supported here** — sending it is a `400`, not a silently unfiltered result. Search does not narrow by category; put the term in `q`, or filter on `/events`.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
@@ -506,6 +511,7 @@ Error responses will typically be in JSON format, like:
     *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
     *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
+    *   `category`: **not supported here** — sending it is a `400`. This endpoint filters by tag only. `category` and `tags` are different fields, so there is no equivalent to narrowing one by the other; filter by category on `/events` instead.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
