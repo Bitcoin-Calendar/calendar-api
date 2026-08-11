@@ -119,7 +119,8 @@ These are the parts that are not guessable from the endpoint list. Each was a re
       "path": "/srv/bitcal/data/releases/20260809T095654Z/events_ru.db",
       "sha256": "13748ac7…",
       "rows": 582,
-      "fts": { "indexed": 582, "consistent": true }
+      "fts": { "indexed": 582, "consistent": true },
+      "categories": { "present": true, "count": 15 }
     }
   }
 }
@@ -131,6 +132,13 @@ Those two differing is the failure the endpoint exists to catch.
 
 `fts.consistent` is `indexed == rows`: every event is reachable by search. When it is false,
 `status` becomes `degraded` — the service is up and search is silently incomplete.
+
+`categories` is what the service read out of the artifact at startup, and it is what
+`?category=` validates against. `count: 0` means every category filter is rejected — either
+the artifact predates the column (`present: false`, which is what a rollback looks like) or
+no row carries a value (`present: true`, which should never have been published).
+`publish-db.sh` refuses to leave a release in the second state. It does not affect `status`:
+a rollback target is not a degraded service.
 
 **The service refuses to start** if a full-text index is missing, empty or unreadable. That
 is deliberate: a broken index makes `/api/search` return an empty result set, which is
