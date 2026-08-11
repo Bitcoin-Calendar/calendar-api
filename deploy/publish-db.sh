@@ -7,6 +7,7 @@
 # written, which is why the steps below are in the order they are.
 #
 #   local  preflight  checksums + validate.py + scoped git state
+#   remote preflight  rollback target, disk, and that the box can run the checks
 #   remote stage      copy into releases/<ts>.incoming, verify, permission, rename
 #   remote validate   run validate.py against the STAGED copy, not just the source
 #   local  schema     the API's own test, against the staged copy — see below
@@ -14,7 +15,27 @@
 #   remote verify     /health hashes, FTS coverage, categories, and a search assertion
 #   remote prune      keep the last N releases
 #
-# Any failure after the flip rolls back to the previous release automatically.
+# What happens when something fails after the flip depends on what failed, and
+# the distinction is the point:
+#
+#   the release is bad          roll back, automatically. A service that will
+#                               not come up, a /health that describes a
+#                               different release, a search term that matches
+#                               nothing — the artifact is the problem.
+#   the *check* could not run   do not roll back. An unreachable box or a
+#                               missing jq says nothing about the release, and
+#                               reverting a publish that may be perfectly good
+#                               because the checker broke is the wrong trade.
+#                               The script exits non-zero saying the release is
+#                               live and unverified, and prints the commands to
+#                               check or undo it by hand.
+#
+# It cannot promise more than that: rolling back needs SSH too, so a box that
+# has gone away cannot be rolled back to anything by this or any other script.
+# What it does promise is that it never exits quietly. Preflight checks the
+# tooling the later steps depend on — jq, a service already answering /health —
+# before anything is staged, so the second case is rare: a missing jq is a
+# property of the box, not something that appears halfway through a publish.
 #
 # The restart is not optional. SQLite holds an open file descriptor on the
 # database inode; flipping `current` alone leaves the old file being served,
@@ -62,6 +83,10 @@ KEEP=5
 DRY_RUN=0
 ASSUME_YES=0
 ALLOW_SCHEMA_DRIFT=0
+
+# Read from the box during preflight, and empty when it could not be read — in
+# which case the search assertion is skipped rather than guessed at.
+API_KEY=""
 
 # The repo this script lives in, so the schema guard can find the Go suite
 # regardless of where it was invoked from.
@@ -236,6 +261,40 @@ remote "python3 -c 'import sqlite3' >/dev/null 2>&1" \
 
 # The box has no sqlite3 CLI, which is why every remote database assertion in
 # this script goes through python3 or /health rather than shelling out to it.
+
+# Everything the verify step needs, proved before anything is staged.
+#
+# These are properties of the box, not of the release: jq either is installed or
+# is not, and the service either is answering or is not, and neither changes
+# halfway through a publish. Discovering them here costs nothing — nothing has
+# been copied, no symlink has moved — and the operator gets "install jq on the
+# box" instead of a rolled-back release and a verify step that could not run.
+remote "command -v jq >/dev/null 2>&1" \
+	|| die "jq is not installed on $SSH_HOST, and the search assertion at the end of this
+       script needs it. Install it (apt-get install -y jq) and re-run. Publishing
+       without it would mean flipping the symlink and then discovering that the
+       release cannot be verified."
+
+# Only when something is already being served. On a first publish there is
+# nothing to answer, and requiring it would make the script unable to bootstrap.
+if [ -n "$PREVIOUS_RELEASE" ]; then
+	remote "curl -sf --max-time 5 $HEALTH_URL >/dev/null 2>&1" \
+		|| die "$SERVICE is not answering $HEALTH_URL, so it is unhealthy before this
+       script has touched anything. Fix that first: a rollback needs a service
+       that can come back up, and a verify step needs one that can answer."
+	ok "service answering /health"
+fi
+
+# Read here rather than after the flip for the same reason. It is also the one
+# remote read whose failure used to be indistinguishable from an empty file.
+if ! API_KEY=$(remote "sed -n 's/^API_KEYS=//p' /etc/bitcal/api.env | cut -d, -f1"); then
+	API_KEY=""
+fi
+if [ -z "$API_KEY" ]; then
+	warn "could not read an API key from /etc/bitcal/api.env; the search assertion will be skipped"
+else
+	ok "api key readable, search assertion will run"
+fi
 
 AVAIL_KB=$(remote "df -Pk $REMOTE_DATA | awk 'NR==2 {print \$4}'")
 # Only the files that ship. $SOURCE_DIR also holds superseded/, which is an
@@ -430,6 +489,20 @@ fi
 
 step "Flipping the symlink and restarting"
 
+# Every remote read from here to the end of the script is written as
+# `if ! VAR=$(remote …)`. A bare `VAR=$(remote …)` takes the exit status of the
+# command substitution, so under `set -e` an unreachable box stops the script
+# dead between the flip and any rollback — no message, no rollback, exit 1, and
+# a release left live that nobody checked. Inside an `if` condition the
+# assignment is exempt from `set -e` and the failure can be answered.
+#
+# There is deliberately no `trap … ERR` doing this centrally. It would not fire
+# for any of these sites, because ERR traps do not fire inside `if` conditions
+# or `&&`/`||` chains, which is where every one of them now lives; it would add
+# a second, invisible path into rollback, which is the most destructive thing
+# this script does; and it would need its own guard against rolling back twice
+# when a `die` path has already done it. Explicit at each site is longer and
+# reviewable.
 rollback() {
 	[ -n "$PREVIOUS_RELEASE" ] || {
 		warn "no previous release to roll back to; $SERVICE is left stopped or unhealthy"
@@ -471,7 +544,17 @@ ok "current -> $RELEASE"
 # process that keeps dying — the artifact was rejected. That is the signal the
 # poll below watches for, and it is why this reports a bad release in seconds
 # rather than waiting out the whole timeout.
-RESTARTS_BEFORE=$(remote "systemctl show $SERVICE -p NRestarts --value 2>/dev/null || echo 0")
+if ! RESTARTS_BEFORE=$(remote "systemctl show $SERVICE -p NRestarts --value 2>/dev/null || echo 0"); then
+	# The symlink has moved but nothing has restarted, so the running process
+	# still holds the previous inode and callers are unaffected. Putting the
+	# symlink back is cheap and leaves the box consistent. Carrying on with a
+	# guessed baseline is not: a wrong NRestarts turns the poll below into a
+	# false CRASHLOOP verdict, which rolls back anyway — with a worse story.
+	warn "could not read NRestarts from the box"
+	rollback
+	die "lost the box immediately after the symlink flip; the flip was undone.
+       Nothing had restarted, so nothing was serving the new release yet."
+fi
 
 remote "systemctl restart $SERVICE" || { rollback; die "restart failed"; }
 
@@ -521,7 +604,17 @@ ok "healthy after ${ELAPSED}s"
 
 step "Verifying"
 
-HEALTH=$(remote "curl -s --max-time 10 $HEALTH_URL")
+if ! HEALTH=$(remote "curl -s --max-time 10 $HEALTH_URL"); then
+	# Unlike the search probe below, this one does roll back. /health answered
+	# seconds ago — the wait loop above will not leave this block otherwise — so
+	# a failure now is the service going away after coming up, not a checker
+	# that was never able to run. curl's own failure is included in that: a
+	# refused connection here means nothing is listening.
+	warn "the service stopped answering $HEALTH_URL after reporting healthy"
+	rollback
+	die "the new release came up and then stopped answering. It was rolled back;
+       the rejected release was left at $TARGET for inspection."
+fi
 
 # Parsed locally with python3 — already a hard dependency for validate.py —
 # rather than by piping into a remote jq per field. One round trip, one place
@@ -638,31 +731,88 @@ done
 # Vocabulary assertion. The strongest single end-to-end signal, and the only
 # one here that would catch a tokenizer change: it goes through the real search
 # endpoint rather than /health. Cyrillic is the case that actually breaks.
+#
+# Two failures live here and they are kept apart, because they deserve opposite
+# answers. A term that matches nothing is an answer, and a damning one: the
+# index or the tokenizer is broken for that script, and the release comes back
+# out. A probe that never produced an answer at all — the box unreachable, jq
+# gone, curl dead — is evidence about the box, not about the release, and
+# reverting a publish that may be perfectly good because the checker broke would
+# be the wrong trade. That one exits non-zero with the release left running and
+# the commands to finish by hand.
+#
+# Both used to be the same flag, and before that both used to read as a pass:
+# under `[ "$total" -eq 0 ]` an empty $total errored to false, the elif errored
+# to false too, and control fell through to the ok branch — so a verify whose
+# probe had died printed ok with an empty count.
 step "Vocabulary"
-API_KEY=$(remote "sed -n 's/^API_KEYS=//p' /etc/bitcal/api.env | cut -d, -f1")
-[ -n "$API_KEY" ] || warn "could not read an API key from /etc/bitcal/api.env; skipping the search assertion"
 
-if [ -n "$API_KEY" ]; then
+if [ -z "$API_KEY" ]; then
+	# Reported at preflight, before anything was staged. Repeated here so the
+	# absence of the assertion is visible in the release output too.
+	warn "no API key was readable at preflight; skipping the search assertion"
+else
 	vocab_failed=0
+	probe_broken=0
 	for pair in "ru:$VOCAB_RU_TERM:$VOCAB_RU_LAST" "en:$VOCAB_EN_TERM:$VOCAB_EN_LAST"; do
 		lang=${pair%%:*}; rest=${pair#*:}
 		term=${rest%:*}; last=${rest##*:}
-		total=$(remote "curl -s --max-time 10 -H 'X-API-KEY: $API_KEY' --get \
+		if ! total=$(remote "curl -s --max-time 10 -H 'X-API-KEY: $API_KEY' --get \
 			--data-urlencode 'q=$term' --data-urlencode 'lang=$lang' \
-			'$API_URL/search' | jq -r '.pagination.total // 0'")
-		if [ "$total" -eq 0 ]; then
+			'$API_URL/search' | jq -r '.pagination.total // 0'"); then
+			warn "$lang: could not reach the box to run the search probe"
+			probe_broken=1
+			continue
+		fi
+		case "$total" in
+		'' | *[!0-9]*)
+			# ssh worked and the answer is unusable: jq missing (preflight says
+			# it was there, so it went away mid-publish), curl failing inside
+			# the remote pipeline, or /search answering something that is not
+			# JSON. Same bucket as an unreachable box — we never got an answer.
+			warn "$lang: the search probe returned no usable total (got '$total')"
+			probe_broken=1
+			;;
+		0)
 			warn "$lang: '$term' matched NOTHING (was $last) — the index or the tokenizer is broken for this script"
 			vocab_failed=1
-		elif [ "$total" -ne "$last" ]; then
+			;;
+		"$last")
+			ok "$lang: '$term' -> $total"
+			;;
+		*)
 			upper=$(printf '%s' "$lang" | tr '[:lower:]' '[:upper:]')
 			ok "$lang: '$term' -> $total (was $last; update VOCAB_${upper}_LAST in this script if intended)"
-		else
-			ok "$lang: '$term' -> $total"
-		fi
+			;;
+		esac
 	done
+
+	# A proven-bad index outranks a broken probe: if one language answered zero,
+	# roll back whatever happened to the other.
 	if [ "$vocab_failed" -eq 1 ]; then
 		rollback
 		die "a language returned no search results at all — not publishing this"
+	fi
+
+	if [ "$probe_broken" -eq 1 ]; then
+		warn "the release is LIVE and the search assertion never ran against it"
+		die "could not run the search assertion — the release was NOT rolled back.
+       Everything /health can prove about $RELEASE passed; only the end-to-end
+       search check is missing, and rolling back a release on the strength of a
+       broken checker would be worse than leaving it up unverified.
+
+       Check it by hand once the box is reachable (the key is the first entry
+       in /etc/bitcal/api.env):
+
+         ssh $SSH_HOST \"curl -s -H 'X-API-KEY: <key>' --get \\
+           --data-urlencode 'q=$VOCAB_RU_TERM' --data-urlencode 'lang=ru' \\
+           '$API_URL/search' | jq .pagination.total\"
+
+       Expected around $VOCAB_RU_LAST. If it answers 0, undo the release with:
+
+         ssh $SSH_HOST \"ln -sfn '$PREVIOUS_RELEASE' $REMOTE_DATA/current.new \\
+           && mv -T $REMOTE_DATA/current.new $REMOTE_DATA/current \\
+           && systemctl restart $SERVICE\""
 	fi
 fi
 
@@ -672,7 +822,12 @@ fi
 
 step "Pruning old releases (keeping $KEEP)"
 
-PRUNED=$(remote "bash -s" -- "$REMOTE_DATA" "$KEEP" <<'REMOTE'
+# Housekeeping, after a release that has already passed every assertion. A
+# failure here is not grounds to touch the release: old directories left on
+# disk are a disk-space problem, not a serving problem. It is still said out
+# loud, because the whole point of pruning is that nobody watches disk usage.
+PRUNED=""
+if ! PRUNED=$(remote "bash -s" -- "$REMOTE_DATA" "$KEEP" <<'REMOTE'
 set -euo pipefail
 data="$1"; keep="$2"
 current=$(readlink -f "$data/current")
@@ -690,14 +845,23 @@ for d in "${all[@]:0:$((count - keep))}"; do
 	esac
 done
 REMOTE
-)
-if [ -n "$PRUNED" ]; then
+); then
+	warn "pruning failed; old releases are still on the box and will need clearing by hand:"
+	warn "  ssh $SSH_HOST 'ls -1 $REMOTE_DATA/releases'"
+	warn "the release itself is published and verified — this does not affect what is served"
+	PRUNED=""
+elif [ -n "$PRUNED" ]; then
 	printf '%s\n' "$PRUNED" | sed 's/^/       removed /'
 else
 	ok "nothing to prune"
 fi
 
-REMAINING=$(remote "ls -1 $REMOTE_DATA/releases | wc -l | tr -d ' '")
+# Cosmetic, and the last thing this script does. A box that becomes unreachable
+# between the prune and here has not affected a release that is already live and
+# already verified, so this reports what it knows rather than exiting on it.
+if ! REMAINING=$(remote "ls -1 $REMOTE_DATA/releases | wc -l | tr -d ' '"); then
+	REMAINING="an unknown number of"
+fi
 
 # ---------------------------------------------------------------------------
 
