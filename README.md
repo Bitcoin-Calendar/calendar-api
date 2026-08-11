@@ -116,10 +116,10 @@ These are the parts that are not guessable from the endpoint list. Each was a re
   "version": "0.1.0-dd9c9dd",
   "databases": {
     "ru": {
-      "path": "/srv/bitcal/data/releases/20260809T095654Z/events_ru.db",
-      "sha256": "13748ac7…",
-      "rows": 582,
-      "fts": { "indexed": 582, "consistent": true },
+      "path": "/srv/bitcal/data/releases/20260810T131954Z/events_ru.db",
+      "sha256": "12a5f040…",
+      "rows": 581,
+      "fts": { "indexed": 581, "consistent": true },
       "categories": { "present": true, "count": 15 }
     }
   }

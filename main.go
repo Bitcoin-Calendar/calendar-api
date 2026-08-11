@@ -118,11 +118,16 @@ func badParam(c *fiber.Ctx, name, got, want string) error {
 // helper that returned its error would look like it had refused while the
 // handler carried on and overwrote the body under a 400 status line.
 //
-// Only /api/events honours the parameter. The other two endpoints that return
-// events accepted it and ignored it: a client narrowing a search with
-// &category=bitcoin got every match, with a 200 and nothing anywhere in the
-// response to say the filter had not been applied. That is the same silence the
-// 400 on an unknown category exists to break, arrived at from the other side.
+// Only /api/events honours the parameter. The two list endpoints this guards —
+// /api/search and /api/events/tags/:tag — accepted it and ignored it: a client
+// narrowing a search with &category=bitcoin got every match, with a 200 and
+// nothing anywhere in the response to say the filter had not been applied. That
+// is the same silence the 400 on an unknown category exists to break, arrived
+// at from the other side.
+//
+// /api/events/:id also ignores the parameter and is deliberately not guarded:
+// a fetch by id is not a list a filter could narrow, and the response carries
+// the event's actual category, so nothing about ignoring it is silent.
 //
 // This deliberately does not become a rule about unknown parameters in general.
 // A stray ?foo= carries no expectation that anything will happen; `category` is
@@ -164,8 +169,8 @@ const (
 	defaultLimit = 20
 
 	// maxLimit caps one response. It is a backstop against absurd values rather
-	// than a page-size discipline: at 1000 it sits above the corpus — 582 rows
-	// in the larger language — so a caller who asks for it gets everything in
+	// than a page-size discipline: at 1000 it sits above the corpus — under 600
+	// rows in either language — so a caller who asks for it gets everything in
 	// one body, and only a limit that could not be meant seriously is refused.
 	// The bound still matters, because without one limit=100000 is accepted as
 	// readily as limit=20 and nothing in the response says the endpoint is

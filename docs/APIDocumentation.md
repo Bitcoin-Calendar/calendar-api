@@ -232,7 +232,9 @@ would again be a `200` and an empty list.
 
 `category` is a filter on `/events` only. Sending it to `/search` or `/events/tags/:tag` is a
 `400` rather than being quietly dropped: those endpoints do not narrow by category, and a
-`200` full of unfiltered results is indistinguishable from a filter that ran.
+`200` full of unfiltered results is indistinguishable from a filter that ran. (`/events/:id`
+ignores it, like any other stray parameter: a single-event fetch is not a list a filter could
+narrow, and the response shows the event's real `category`.)
 
 **Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
 (`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
@@ -574,17 +576,17 @@ Error responses will typically be in JSON format, like:
       "version": "0.1.0-abc1234",
       "databases": {
         "en": {
-          "path": "/srv/bitcal/data/releases/20260809T084800Z/events_en.db",
-          "sha256": "cb95ad42a181aff3f2cf0579ee3f0d647b81db38c8f3228e1d0483fd69a845f2",
+          "path": "/srv/bitcal/data/releases/20260810T131954Z/events_en.db",
+          "sha256": "6abda1c576b81220538b35d2d697064ac5a0ea72ecc6772d9c58832cdcf8f80e",
           "rows": 565,
           "fts": { "indexed": 565, "consistent": true },
           "categories": { "present": true, "count": 15 }
         },
         "ru": {
-          "path": "/srv/bitcal/data/releases/20260809T084800Z/events_ru.db",
-          "sha256": "b2bf2c80054f20dd47d633144d62a5edc46e2184884756fa8719325e1b42581a",
-          "rows": 582,
-          "fts": { "indexed": 582, "consistent": true },
+          "path": "/srv/bitcal/data/releases/20260810T131954Z/events_ru.db",
+          "sha256": "12a5f04093e31ceb0a34cf44b60f4d5758869c96e990bb5b840ac3f983b45ba4",
+          "rows": 581,
+          "fts": { "indexed": 581, "consistent": true },
           "categories": { "present": true, "count": 15 }
         }
       }
