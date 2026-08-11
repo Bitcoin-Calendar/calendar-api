@@ -405,7 +405,13 @@ func getTagsHandler(c *fiber.Ctx) error {
 
 	zlog.Info().Str("lang", lang).Msg("getTagsHandler called")
 
-	var result []TagInfo
+	// Initialised, not declared nil, for the reason spelled out in
+	// ftsSearchHandler: Raw().Scan() leaves the slice nil when nothing matches
+	// and a nil slice marshals to JSON null, so a caller would have to
+	// special-case one endpoint. /api/categories was written this way from the
+	// start; this one is its sibling and must not answer in a different shape.
+	// Reachable only on an artifact where no row carries a usable tag.
+	result := []TagInfo{}
 	// SQL query to extract, count, and lowercase tags directly from JSON arrays in the 'tags' column.
 	// This approach assumes tags are stored as valid JSON arrays (e.g., ["tag1", "tag2"]).
 	// It replaces the previous Go-based parsing and aggregation logic.

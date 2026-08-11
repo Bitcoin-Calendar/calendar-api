@@ -346,6 +346,52 @@ func TestIndexedIsNotReadFromTheVirtualTable(t *testing.T) {
 	}
 }
 
+// TestTagsAnswersWithAnArrayWhenThereAreNone pins the shape of the one response
+// in this service that could still be JSON null.
+//
+// /api/tags scans into its slice with Raw().Scan(), which leaves it nil when
+// nothing matches, and a nil slice marshals to null rather than []. Search hit
+// this and was fixed; /api/categories was written correctly for the same reason;
+// this endpoint kept the old shape, so two sibling list endpoints answered
+// differently on the same artifact and a client had to special-case one of them.
+//
+// It takes an artifact where no row carries a usable tag to reach, which is why
+// no existing test could: every fixture and every release has tags.
+func TestTagsAnswersWithAnArrayWhenThereAreNone(t *testing.T) {
+	dir := stageArtifact(t, func(db *sql.DB) error {
+		_, err := db.Exec(`UPDATE events SET tags = '[]'`)
+		return err
+	})
+
+	base, serviceLog, startErr := bootService(t, dir)
+	if startErr != nil {
+		t.Fatalf("the service refused to start against an artifact with no tags: %v\n"+
+			"--- log ---\n%s", startErr, serviceLog)
+	}
+
+	var raw struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if code := getFrom(t, base, "/api/tags?lang=ru", &raw); code != http.StatusOK {
+		t.Fatalf("/api/tags: want 200, got %d", code)
+	}
+	if string(raw.Data) != "[]" {
+		t.Errorf("/api/tags: want an empty array, got %s — null is what a nil slice marshals "+
+			"to, and a caller iterating the list has to special-case it", raw.Data)
+	}
+
+	// The control: nothing about this artifact stops the rest of the service
+	// answering, so an empty list here is the real answer rather than a failure
+	// that happens to render as one.
+	var list eventList
+	if code := getFrom(t, base, "/api/events?lang=ru&limit=100", &list); code != http.StatusOK {
+		t.Fatalf("/api/events: want 200, got %d", code)
+	}
+	if list.Pagination.Total != 5 {
+		t.Errorf("/api/events total: want 5, got %d", list.Pagination.Total)
+	}
+}
+
 func fetchJSON(t *testing.T, url string, into interface{}) {
 	t.Helper()
 	res, err := http.Get(url)
