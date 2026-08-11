@@ -792,6 +792,16 @@ func main() {
 					"?category= will be rejected and /api/categories will be empty")
 			continue
 		}
+		// The column is there and empty. Upstream broke validator invariant 13:
+		// no row carries a category, so ?category= can only be rejected. Warn,
+		// because an info line reading `categories: 0` is not something anyone
+		// reads a boot log to find.
+		if len(set.sorted) == 0 {
+			zlog.Warn().Str("lang", lang).
+				Msg("This artifact has a category column but no categories: no row carries a " +
+					"value. ?category= will be rejected and /api/categories will be empty")
+			continue
+		}
 		zlog.Info().Str("lang", lang).Int("categories", len(set.sorted)).Msg("Category vocabulary loaded")
 	}
 

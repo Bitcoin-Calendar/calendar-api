@@ -359,6 +359,81 @@ func TestCategoriesAreLanguageSpecific(t *testing.T) {
 	}
 }
 
+// TestEmptyVocabularyRejectsEveryCategory covers the artifact that has the
+// column and carries no values in it.
+//
+// The filter used to accept every value in that state, on the reasoning that
+// there was no vocabulary to validate against — so ?category=nonesuch answered
+// 200 with an empty list, which is precisely what the 400 was added to prevent.
+// That permissiveness was written for an artifact predating the column; that
+// case is handled separately now, and this was the only route left to the silent
+// empty result.
+//
+// Reproduced against a copy of a real artifact with `UPDATE events SET category
+// = NULL` before it was written here. Upstream cannot publish such a file
+// without breaking validator invariant 13, which is why nothing else would catch
+// it: this is the API refusing to answer a question it cannot answer, not a
+// guess about what the data will look like.
+func TestEmptyVocabularyRejectsEveryCategory(t *testing.T) {
+	dir := stageArtifact(t, func(db *sql.DB) error {
+		_, err := db.Exec(`UPDATE events SET category = NULL`)
+		return err
+	})
+
+	base, serviceLog, startErr := bootService(t, dir)
+	if startErr != nil {
+		t.Fatalf("the service refused to start against an artifact whose category column is "+
+			"empty. Every other endpoint answers correctly on it, exactly as on an artifact "+
+			"predating the column: %v\n--- log ---\n%s", startErr, serviceLog)
+	}
+	// Distinguishes this from the missing-column path, which rejects categories
+	// too — without it this test would pass against an artifact that simply had
+	// no such column, i.e. for the wrong reason.
+	if !strings.Contains(serviceLog, "no categories") {
+		t.Errorf("the service degraded silently; nothing in its log says the column carries "+
+			"no values:\n%s", serviceLog)
+	}
+
+	// The control: the column is there and the rest of the service is fine.
+	var list eventList
+	if code := getFrom(t, base, "/api/events?lang=ru&limit=100", &list); code != http.StatusOK {
+		t.Fatalf("/api/events: want 200, got %d", code)
+	}
+	if list.Pagination.Total != 5 {
+		t.Errorf("/api/events total: want 5, got %d", list.Pagination.Total)
+	}
+
+	// `bitcoin` is a real category in the unmutated fixture, and `nonesuch` never
+	// was: with no vocabulary, both are equally unanswerable and both must be
+	// refused.
+	for _, category := range []string{"nonesuch", "bitcoin"} {
+		var body struct {
+			Error string `json:"error"`
+		}
+		code := getFrom(t, base, "/api/events?lang=ru&category="+category, &body)
+		if code != http.StatusBadRequest {
+			t.Errorf("category=%s against an empty vocabulary: want 400, got %d. 200 is an "+
+				"empty list indistinguishable from a category that genuinely has no events",
+				category, code)
+		}
+		if !strings.Contains(body.Error, "no categories") {
+			t.Errorf("category=%s: the rejection does not say the artifact carries none: %q",
+				category, body.Error)
+		}
+	}
+
+	// And the discovery endpoint agrees, in the shape a client can iterate.
+	var raw struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if code := getFrom(t, base, "/api/categories?lang=ru", &raw); code != http.StatusOK {
+		t.Fatalf("/api/categories: want 200, got %d", code)
+	}
+	if string(raw.Data) != "[]" {
+		t.Errorf("/api/categories: want an empty array, got %s", raw.Data)
+	}
+}
+
 // TestServiceBootsWithoutACategoryColumn is a regression test for a boot failure
 // that only an old artifact could trigger, which is precisely why nothing caught
 // it: every fixture and every current release carries the column.
