@@ -52,9 +52,27 @@ const (
 var DB_EN *gorm.DB
 var DB_RU *gorm.DB
 
+// resolveLang maps whatever the caller sent to the language that will actually
+// serve the request. An unrecognised value falls back to English, which is
+// documented behaviour — `lang=xx` is not an error.
+//
+// Anything keyed by language must resolve through this rather than use the raw
+// query parameter, or it ends up describing a different artifact than the one
+// being read. That is not hypothetical: ?category= first validated against
+// categoriesByLang[<raw lang>], so `?lang=xx&category=nonesuch` found no
+// vocabulary to check against, accepted the value, queried the English database
+// and answered 200 with an empty list — reintroducing, for one spelling of one
+// parameter, exactly the silent-empty-result the 400 exists to prevent.
+func resolveLang(langCode string) string {
+	if strings.ToLower(langCode) == "ru" {
+		return "ru"
+	}
+	return "en"
+}
+
 // Helper function to get the correct DB instance based on language
 func getDBInstance(langCode string) *gorm.DB {
-	if strings.ToLower(langCode) == "ru" {
+	if resolveLang(langCode) == "ru" {
 		return DB_RU
 	}
 	return DB_EN // Default to English
@@ -521,8 +539,11 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 	// way in because every stored value is lowercase.
 	if categoryStr := c.Query("category"); categoryStr != "" {
 		want := strings.ToLower(strings.TrimSpace(categoryStr))
-		if !categoriesByLang[lang].known(want) {
-			return badParam(c, "category", categoryStr, "one of: "+categoriesByLang[lang].list())
+		// resolveLang, not the raw parameter: the vocabulary consulted must be
+		// the one belonging to the artifact this request will actually read.
+		vocab := categoriesByLang[resolveLang(lang)]
+		if !vocab.known(want) {
+			return badParam(c, "category", categoryStr, "one of: "+vocab.list())
 		}
 		// LOWER on the column, not a bare equality: the closed set is enforced
 		// by the publisher rather than by the schema, so this must not depend
