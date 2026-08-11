@@ -459,6 +459,22 @@ for lang in sorted(set(b_dbs) & set(a_dbs)):
     if not fts.get("consistent") or fts.get("indexed") != a["rows"]:
         problems.append(f'{lang}: index covers {fts.get("indexed")} of {a["rows"]} rows')
 
+    # The vocabulary is derived from the artifact by the binary, so this is the
+    # one check publish-db.sh cannot make: the data is provably unchanged above,
+    # which means any movement here is the new binary reading the same file
+    # differently. A vocabulary that went to zero would reject every ?category=
+    # while looking healthy in every other field.
+    #
+    # Compared only when both snapshots carry it. Absent on one side is a binary
+    # older than the field on that side — the first deploy of one that has it,
+    # or a rollback past it — and neither is a fault.
+    b_cats, a_cats = b.get("categories"), a.get("categories")
+    if b_cats is not None and a_cats is not None and b_cats != a_cats:
+        problems.append(
+            f'{lang}: the category vocabulary changed across a binary deploy —\n'
+            f'         {b_cats} -> {a_cats}\n'
+            f'         The artifact is byte-identical, so this binary reads it differently.')
+
 print("\n".join(notes))
 if problems:
     print("PROBLEMS", file=sys.stderr)

@@ -577,13 +577,15 @@ Error responses will typically be in JSON format, like:
           "path": "/srv/bitcal/data/releases/20260809T084800Z/events_en.db",
           "sha256": "cb95ad42a181aff3f2cf0579ee3f0d647b81db38c8f3228e1d0483fd69a845f2",
           "rows": 565,
-          "fts": { "indexed": 565, "consistent": true }
+          "fts": { "indexed": 565, "consistent": true },
+          "categories": { "present": true, "count": 15 }
         },
         "ru": {
           "path": "/srv/bitcal/data/releases/20260809T084800Z/events_ru.db",
           "sha256": "b2bf2c80054f20dd47d633144d62a5edc46e2184884756fa8719325e1b42581a",
           "rows": 582,
-          "fts": { "indexed": 582, "consistent": true }
+          "fts": { "indexed": 582, "consistent": true },
+          "categories": { "present": true, "count": 15 }
         }
       }
     }
@@ -600,6 +602,15 @@ Error responses will typically be in JSON format, like:
 | `rows` | Rows in `events`. |
 | `fts.indexed` | Documents in the full-text index, read from `events_fts_docsize`. |
 | `fts.consistent` | `fts.indexed == rows` — every event is reachable by `/api/search`. |
+| `categories.present` | Whether the artifact has a `category` column at all. `false` means it predates 2026-08-09. |
+| `categories.count` | Distinct categories the service read from it at startup — the exact set `?category=` validates against, and the same list `/api/categories` returns. |
+
+`categories` is the one part of this document that describes the artifact's *contents* rather
+than its shape, and it is here for the release check: when `count` is `0`, every `?category=`
+is rejected and `/api/categories` is empty, and nothing else outside the boot log says so.
+The two fields are separate because they mean different things — `present: false` is an
+artifact older than the column, which is a legitimate rollback target; `present: true` with
+`count: 0` is a column no row carries a value in, which should never have been published.
 
 #### On the status code
 
@@ -607,6 +618,11 @@ Error responses will typically be in JSON format, like:
 `degraded`. A degraded process is answering every endpoint correctly except for the
 completeness of search, and returning a failure code would have a load balancer pull it for
 no good reason. **Read the `status` field, not the HTTP code.**
+
+`status` reports full-text coverage only. An absent or empty category vocabulary does **not**
+make it `degraded`: serving an artifact that predates the column is what a rollback looks
+like, and a dashboard alarming for the duration of one is pressure to end the rollback rather
+than to fix the release. Read `categories` for that.
 
 The states that would make search useless rather than incomplete — the index missing, empty,
 or unreadable — are not reported here at all, because the service refuses to start on them.

@@ -443,6 +443,48 @@ func TestCategoriesAreLanguageSpecific(t *testing.T) {
 	}
 }
 
+// TestHealthReportsTheVocabularyItServes is the assertion publish-db.sh depends
+// on. Its verify step parses /health and would otherwise have no way to see that
+// an artifact carries no categories: the boot log says so once, and nothing reads
+// a boot log during a release.
+//
+// The count is checked against /api/categories rather than against a number
+// written here. A literal would pass just as well against a field populated from
+// a second query, or from a constant — what has to be true is that /health
+// describes the vocabulary the service is actually validating against, and the
+// endpoint is where that vocabulary is observable.
+func TestHealthReportsTheVocabularyItServes(t *testing.T) {
+	var health healthDoc
+	fetchJSON(t, baseURL+"/health", &health)
+
+	for _, lang := range []string{"en", "ru"} {
+		t.Run(lang, func(t *testing.T) {
+			db, found := health.Databases[lang]
+			if !found {
+				t.Fatalf("%s: absent from /health", lang)
+			}
+			if !db.Categories.Present {
+				t.Fatalf("%s: /health reports no category column, but the fixture has one", lang)
+			}
+
+			var body struct {
+				Data []categoryInfo `json:"data"`
+			}
+			if code := getAs(t, apiKey3, "/api/categories?lang="+lang, &body); code != http.StatusOK {
+				t.Fatalf("/api/categories: want 200, got %d", code)
+			}
+			if len(body.Data) == 0 {
+				t.Fatal("/api/categories returned nothing, so the count below proves nothing")
+			}
+			if db.Categories.Count != len(body.Data) {
+				t.Errorf("%s: /health says %d categories, /api/categories lists %d — the "+
+					"release check would be asserting against a number the service does not "+
+					"filter by", lang, db.Categories.Count, len(body.Data))
+			}
+		})
+	}
+}
+
 // TestEmptyVocabularyRejectsEveryCategory covers the artifact that has the
 // column and carries no values in it.
 //
@@ -515,6 +557,27 @@ func TestEmptyVocabularyRejectsEveryCategory(t *testing.T) {
 	}
 	if string(raw.Data) != "[]" {
 		t.Errorf("/api/categories: want an empty array, got %s", raw.Data)
+	}
+
+	// This is the state publish-db.sh must refuse to publish, so /health has to
+	// distinguish it from an artifact predating the column: the column is there,
+	// and nothing is in it.
+	var health healthDoc
+	fetchJSON(t, base+"/health", &health)
+	if health.Status != "ok" {
+		t.Errorf("status: want ok — an empty vocabulary is not an index problem, and marking "+
+			"it degraded would alarm for as long as such an artifact was served, got %q",
+			health.Status)
+	}
+	for lang, db := range health.Databases {
+		if !db.Categories.Present {
+			t.Errorf("%s: /health says the column is absent; it is present and empty, which is "+
+				"a different failure with a different fix", lang)
+		}
+		if db.Categories.Count != 0 {
+			t.Errorf("%s: /health reports %d categories on an artifact where every value is NULL",
+				lang, db.Categories.Count)
+		}
 	}
 }
 
@@ -599,5 +662,24 @@ func TestServiceBootsWithoutACategoryColumn(t *testing.T) {
 	if string(raw.Data) != "[]" {
 		t.Errorf("/api/categories: want an empty array, got %s — null is what a nil slice "+
 			"marshals to, and a caller has to special-case it", raw.Data)
+	}
+
+	// /health must say the column is absent rather than that the vocabulary is
+	// empty. Serving this artifact is a correct outcome — it is what a rollback
+	// looks like — and the release check treats the two differently.
+	var health healthDoc
+	fetchJSON(t, base+"/health", &health)
+	if health.Status != "ok" {
+		t.Errorf("status: want ok, got %q — a rollback target is not a degraded service",
+			health.Status)
+	}
+	for lang, db := range health.Databases {
+		if db.Categories.Present {
+			t.Errorf("%s: /health claims a category column on an artifact that has none", lang)
+		}
+		if db.Categories.Count != 0 {
+			t.Errorf("%s: /health reports %d categories with no column to hold them",
+				lang, db.Categories.Count)
+		}
 	}
 }

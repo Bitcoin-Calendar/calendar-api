@@ -29,6 +29,10 @@ type healthDoc struct {
 			Indexed    int64 `json:"indexed"`
 			Consistent bool  `json:"consistent"`
 		} `json:"fts"`
+		Categories struct {
+			Present bool `json:"present"`
+			Count   int  `json:"count"`
+		} `json:"categories"`
 	} `json:"databases"`
 }
 

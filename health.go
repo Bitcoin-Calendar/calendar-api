@@ -18,10 +18,29 @@ var version = "dev"
 
 // DatabaseHealth describes one artifact as this process actually has it open.
 type DatabaseHealth struct {
-	Path   string    `json:"path"`
-	SHA256 string    `json:"sha256"`
-	Rows   int64     `json:"rows"`
-	FTS    FTSHealth `json:"fts"`
+	Path       string         `json:"path"`
+	SHA256     string         `json:"sha256"`
+	Rows       int64          `json:"rows"`
+	FTS        FTSHealth      `json:"fts"`
+	Categories CategoryHealth `json:"categories"`
+}
+
+// CategoryHealth reports the category vocabulary this process is serving.
+//
+// Present and Count are separate because they fail for different reasons and
+// call for different responses. Present false is an artifact older than the
+// column — a rollback target, expected to be served that way. Present with
+// Count zero is an artifact whose column carries nothing on any row, which is
+// validator invariant 13 broken upstream and should never have been published.
+// Both reject every ?category=, so a single number would leave the release
+// check unable to say which had happened.
+//
+// It is here because ?category= is the one part of the service whose behaviour
+// depends on the artifact's contents rather than its shape, and nothing else
+// reports that. The boot log says it once; publish-db.sh reads /health.
+type CategoryHealth struct {
+	Present bool `json:"present"`
+	Count   int  `json:"count"`
 }
 
 // HealthResponse is a cross-repo contract: the publisher asserts against it
@@ -32,6 +51,14 @@ type DatabaseHealth struct {
 // way: a degraded service is still serving, and returning a failure code would
 // have a load balancer pull a process that is answering correctly for
 // everything except the completeness of search. Read the field, not the code.
+//
+// An absent or empty category vocabulary deliberately does *not* set
+// "degraded". An artifact predating the column is a rollback target and serving
+// one is a correct outcome, not an incident; marking it degraded would have
+// every dashboard alarm for as long as a rollback was in place, which is the
+// pressure that turns a rollback back into an outage. The condition is reported
+// per database under Categories instead, where publish-db.sh — which knows
+// whether it is publishing or rolling back — can decide what it means.
 type HealthResponse struct {
 	Status    string                    `json:"status"`
 	Version   string                    `json:"version"`
@@ -89,11 +116,23 @@ func buildHealthSnapshot(dbs map[string]struct {
 			snapshot.Status = statusDegraded
 		}
 
+		// Read from what loadCategories put in categoriesByLang rather than
+		// queried again here, so /health cannot report a vocabulary the filter
+		// is not the one validating against. That makes this dependent on
+		// loadCategories having run, which it has: main() loads the vocabulary
+		// before it builds this snapshot, and a missing entry reports the same
+		// zero value an artifact with no column does — the safe direction.
+		vocab := categoriesByLang[lang]
+
 		snapshot.Databases[lang] = DatabaseHealth{
 			Path:   resolved,
 			SHA256: sum,
 			Rows:   rows,
 			FTS:    fts,
+			Categories: CategoryHealth{
+				Present: vocab.present,
+				Count:   len(vocab.sorted),
+			},
 		}
 	}
 

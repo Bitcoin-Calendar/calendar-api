@@ -11,7 +11,7 @@
 #   remote validate   run validate.py against the STAGED copy, not just the source
 #   local  schema     the API's own test, against the staged copy — see below
 #   remote flip       symlink, then restart (mandatory — see below)
-#   remote verify     /health hashes, FTS coverage, and a vocabulary assertion
+#   remote verify     /health hashes, FTS coverage, categories, and a search assertion
 #   remote prune      keep the last N releases
 #
 # Any failure after the flip rolls back to the previous release automatically.
@@ -529,13 +529,27 @@ HEALTH=$(remote "curl -s --max-time 10 $HEALTH_URL")
 #
 # Asserts, in one pass: status is ok; both languages resolve to the release
 # just published (this is the check that catches a missed restart); the hashes
-# the process reports match the checksums that shipped with the artifact; and
-# every row is indexed in both languages.
-if ! VERIFY_OUT=$(python3 - "$TARGET" "$SOURCE_DIR/SHA256SUMS" "$HEALTH" <<'PY'
+# the process reports match the checksums that shipped with the artifact; every
+# row is indexed in both languages; and the category vocabulary is non-empty.
+#
+# The category assertion is here because nothing else can make it. An artifact
+# whose `category` column carries nothing on any row has the right schema, so
+# the schema guard passes it; validate.py's invariant 13 is what should have
+# caught it upstream, and if that has failed there is no second opinion. The API
+# rejects every ?category= against such an artifact — correctly, since nothing
+# can match — which means publishing one breaks every client's category filter
+# in a way that only shows up as 400s in someone else's logs. The service says
+# so once in its boot log, which no release reads. /health carries it so this
+# does.
+#
+# Lines prefixed with ! are warnings rather than failures; see the dispatch
+# below.
+if ! VERIFY_OUT=$(python3 - "$TARGET" "$SOURCE_DIR/SHA256SUMS" "$HEALTH" "$ALLOW_SCHEMA_DRIFT" <<'PY'
 import json, sys, pathlib
 
 target, sums_path = sys.argv[1], sys.argv[2]
 health = json.loads(sys.argv[3])
+allow_schema_drift = sys.argv[4] == "1"
 
 published = {}
 for line in pathlib.Path(sums_path).read_text().splitlines():
@@ -573,6 +587,34 @@ for lang in ("en", "ru"):
     else:
         notes.append(f'{lang}: {db["rows"]} rows, all indexed, sha256 matches')
 
+    # Absent, rather than empty, when the running binary predates the field.
+    # That is not a reason to fail a publish and roll back: the binary and the
+    # artifact are released by two different scripts on purpose, so a data
+    # release against an older binary is an ordinary state of the world. It is
+    # said out loud so that a silently skipped check cannot read as a passing
+    # one.
+    cats = db.get("categories")
+    if cats is None:
+        notes.append(f"!{lang}: /health carries no category vocabulary; the running binary "
+                     f"predates the field, so this release is not checked for one")
+    elif not cats.get("present"):
+        # No column at all: the artifact is older than 2026-08-09. The schema
+        # guard should already have refused it, so reaching here means it was
+        # bypassed, and --allow-schema-drift is exactly that bypass.
+        msg = (f"{lang}: the published artifact has no `category` column, so ?category= is "
+               f"rejected for every value and /api/categories is empty")
+        (notes.append("!" + msg) if allow_schema_drift else problems.append(msg))
+    elif not cats.get("count"):
+        # The column is there and every row is NULL or blank. No schema check
+        # can see this, and --allow-schema-drift does not cover it: that flag is
+        # for data the API cannot yet express, not for data that is not there.
+        problems.append(
+            f"{lang}: the `category` column carries no values on any of {db['rows']} rows.\n"
+            f"         validate.py invariant 13 says every row has one, so this artifact\n"
+            f"         should not exist. Every ?category= will be rejected until it is fixed.")
+    else:
+        notes.append(f'{lang}: {cats["count"]} categories')
+
 print("\n".join(notes))
 if problems:
     print("PROBLEMS", file=sys.stderr)
@@ -585,7 +627,13 @@ PY
 	rollback
 	die "/health does not describe the release that was just published"
 fi
-printf '%s\n' "$VERIFY_OUT" | while IFS= read -r line; do [ -n "$line" ] && ok "$line"; done
+printf '%s\n' "$VERIFY_OUT" | while IFS= read -r line; do
+	case "$line" in
+		"") continue ;;
+		"!"*) warn "${line#!}" ;;
+		*) ok "$line" ;;
+	esac
+done
 
 # Vocabulary assertion. The strongest single end-to-end signal, and the only
 # one here that would catch a tokenizer change: it goes through the real search
