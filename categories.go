@@ -18,6 +18,16 @@ const categoryProbeTimeout = 10 * time.Second
 // categorySet is one language's category vocabulary, read out of its artifact
 // at startup.
 type categorySet struct {
+	// present is whether the artifact has a `category` column at all. It is a
+	// different question from whether the vocabulary is empty, and conflating
+	// the two is what made an artifact published before 2026-08-09 a boot
+	// failure: see loadCategories.
+	//
+	// The zero value is false, which is also what a lookup for a language that
+	// was never loaded returns. That is the safe direction — an unknown
+	// language validates against nothing and rejects, rather than accepting
+	// silently, which is the shape the ?lang=xx bug took.
+	present bool
 	// members is the lookup used to validate ?category=. Keys are lowercase.
 	members map[string]bool
 	// sorted preserves a stable order for error messages, so a client is told
@@ -48,9 +58,34 @@ var categoriesByLang = map[string]categorySet{}
 // file descriptor on a specific inode, so the vocabulary cannot drift under it;
 // publish-db.sh restarts the service on every release precisely because that is
 // the only way anything here picks up new data.
+//
+// An artifact that predates the column is not an error. `category` arrived on
+// 2026-08-09, every release before that has no such column, and those files are
+// still on the box as rollback targets — publish-db.sh's rollback() re-points
+// `current` at the previous release and restarts. Treating a missing column as
+// a fatal error made this binary refuse to start against any of them, which
+// turned a rollback into an outage and silently coupled the binary's version to
+// the artifact's. Everything except ?category= works perfectly well on such an
+// artifact, so the service boots, says so at warn, and rejects the one filter it
+// cannot answer.
 func loadCategories(db *gorm.DB) (categorySet, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), categoryProbeTimeout)
 	defer cancel()
+
+	// Asked of the schema rather than inferred from a failed SELECT. Matching
+	// on "no such column" would work today but puts a driver's error text on
+	// the boot path, where a reworded message becomes a service that will not
+	// start; pragma_table_info answers the question directly and is the same
+	// idiom the suite already uses to read an artifact's columns.
+	var hasColumn int64
+	if err := db.WithContext(ctx).Raw(
+		`SELECT count(*) FROM pragma_table_info('events') WHERE name = 'category'`,
+	).Scan(&hasColumn).Error; err != nil {
+		return categorySet{}, fmt.Errorf("checking for the category column: %w", err)
+	}
+	if hasColumn == 0 {
+		return categorySet{}, nil
+	}
 
 	var values []string
 	if err := db.WithContext(ctx).Raw(
@@ -66,35 +101,47 @@ func loadCategories(db *gorm.DB) (categorySet, error) {
 		return categorySet{}, fmt.Errorf("reading the category vocabulary: %w", err)
 	}
 
-	// An artifact with no categories at all is a real possibility — an older
-	// release predating the column would look exactly like this — and it must
-	// not be mistaken for "every category is invalid". The handler treats an
-	// empty set as "no vocabulary to validate against" and lets the filter
-	// through, so this returns cleanly rather than failing the boot: the column
-	// is canonical's invariant to enforce, not this service's to refuse to
-	// start over.
-	set := categorySet{members: make(map[string]bool, len(values)), sorted: values}
+	// The column exists but carries nothing on any row. That is not a rollback
+	// target, it is an upstream failure of validator invariant 13, and the
+	// handler treats an empty set as "no vocabulary to validate against" and
+	// lets the filter through — which means ?category=anything answers 200 with
+	// an empty list. Left as it was, but note that it is now the only route to
+	// that behaviour: the case this permissiveness was written for, an artifact
+	// predating the column, is handled above and no longer arrives here.
+	set := categorySet{present: true, members: make(map[string]bool, len(values)), sorted: values}
 	for _, v := range values {
 		set.members[v] = true
 	}
 	return set, nil
 }
 
-// known reports whether a category exists in this artifact. An empty
-// vocabulary accepts everything: see loadCategories.
+// known reports whether a category exists in this artifact.
+//
+// An artifact with no category column knows nothing, so every value is
+// rejected: no row can match a column that is not there, and the alternative is
+// the empty list that ?category= exists to avoid. An empty vocabulary on an
+// artifact that does have the column accepts everything: see loadCategories.
 func (c categorySet) known(v string) bool {
+	if !c.present {
+		return false
+	}
 	if len(c.members) == 0 {
 		return true
 	}
 	return c.members[v]
 }
 
-// list renders the vocabulary for an error message.
-func (c categorySet) list() string {
+// expected renders what would have been accepted, as badParam's `want` clause.
+func (c categorySet) expected() string {
+	if !c.present {
+		return "nothing: this artifact predates the category column, so no value can match"
+	}
+	// Unreachable while known() lets an empty vocabulary through, and kept
+	// anyway so that changing that decision does not also need a message.
 	if len(c.sorted) == 0 {
-		return "(this artifact carries no categories)"
+		return "nothing: this artifact carries no categories"
 	}
 	s := append([]string(nil), c.sorted...)
 	sort.Strings(s)
-	return strings.Join(s, ", ")
+	return "one of: " + strings.Join(s, ", ")
 }
