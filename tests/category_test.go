@@ -98,6 +98,19 @@ func TestCategoryFilterIsNotTagFilter(t *testing.T) {
 // indistinguishable from a category that genuinely has no events, and a client
 // cannot tell its own typo from a quiet corner of the corpus.
 func TestUnknownCategoryIsRejected(t *testing.T) {
+	// What the artifact carries, asked of the service rather than listed here,
+	// so this cannot drift from the fixture. Every one of these must appear in
+	// the rejection message.
+	var vocab struct {
+		Data []categoryInfo `json:"data"`
+	}
+	if code := getAs(t, apiKey2, "/api/categories?lang=ru", &vocab); code != http.StatusOK {
+		t.Fatalf("/api/categories: want 200, got %d", code)
+	}
+	if len(vocab.Data) == 0 {
+		t.Fatal("the fixture reports no categories, so the assertions below would pass vacuously")
+	}
+
 	for _, bad := range []string{"nonesuch", "bitcion", "Bitcoin Core", "'; DROP TABLE events;--", "%"} {
 		t.Run(bad, func(t *testing.T) {
 			var body struct {
@@ -109,9 +122,21 @@ func TestUnknownCategoryIsRejected(t *testing.T) {
 			}
 			// The message must name what would have been accepted. A 400 that
 			// only says "invalid" leaves the caller guessing at a vocabulary
-			// they cannot see.
-			if body.Error == "" {
-				t.Error("a rejected category must explain itself")
+			// they cannot see — and asserting merely that the message is
+			// non-empty would accept exactly that, which is why this checks the
+			// vocabulary is in it rather than checking that something was said.
+			for _, ci := range vocab.Data {
+				if !strings.Contains(body.Error, ci.Category) {
+					t.Errorf("category=%q was rejected with %q, which does not name %q. A caller "+
+						"who cannot see the vocabulary has to guess at it from this message.",
+						bad, body.Error, ci.Category)
+				}
+			}
+			// And it must echo what was rejected, or a caller batching requests
+			// cannot tell which one the message is about.
+			if !strings.Contains(body.Error, bad) {
+				t.Errorf("category=%q was rejected with %q, which does not repeat the value sent",
+					bad, body.Error)
 			}
 		})
 	}
