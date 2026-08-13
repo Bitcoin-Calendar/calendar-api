@@ -37,8 +37,7 @@ ask for one rather than sharing.
 It is keyed on the API key rather than the client address deliberately: every consumer of
 this service runs on the same host and reaches it over loopback, so a per-IP limit would put
 all of them in one shared bucket, where they would throttle each other with intermittent
-`429`s as the only symptom. Requests with no API key (`/health`, `/metrics`) fall back to
-per-IP.
+`429`s as the only symptom. Requests with no API key (`/health`) fall back to per-IP.
 
 The response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`.
 
