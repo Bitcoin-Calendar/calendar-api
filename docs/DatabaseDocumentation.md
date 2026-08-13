@@ -83,7 +83,7 @@ category — so a hard-coded `tag=bitcoin` query returns zero rows and `?categor
 
 The languages used to disagree about the category of 62 of the 562 events they share by
 `url_path`. The 2026-08-12 migration closed that: RU is the reviewed language and EN takes the
-same value through `CROSSWALK-ru-en.tsv`, and all 565 paired rows now agree on **both**
+same value through `CROSSWALK-ru-en.tsv`, and all 562 paired rows now agree on **both**
 `category` and `landmark`. A two-language filter on either column returns matching sets.
 
 **The two languages declare these columns in different orders.** RU stores `media` fourth, EN
