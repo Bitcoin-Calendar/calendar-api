@@ -494,10 +494,10 @@ Error responses will typically be in JSON format, like:
     Unlike `tags`, every event has **exactly one** category, so these counts sum to the total
     number of events and always equal `pagination.total` from `/events?category=`.
 
-    The two languages carry the same set of category *names* but different counts, and they
-    disagree about the category of 62 of the 562 events they share by `url_path`. That is
-    catalogued upstream and is data, not a bug — a two-language filter will return genuinely
-    different sets for those events.
+    The two languages carry the same set of category *names* but different counts, because
+    each carries events the other does not. The 562 events they share by `url_path` agree on
+    both `category` and `landmark` — they disagreed on 62 until the 2026-08-12 migration
+    aligned them — so a two-language filter returns matching sets for the shared events.
 
 *   **Example:**
     ```bash
