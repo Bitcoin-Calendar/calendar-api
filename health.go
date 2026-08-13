@@ -23,6 +23,28 @@ type DatabaseHealth struct {
 	Rows       int64          `json:"rows"`
 	FTS        FTSHealth      `json:"fts"`
 	Categories CategoryHealth `json:"categories"`
+	Landmark   LandmarkHealth `json:"landmark"`
+}
+
+// LandmarkHealth reports the landmark flag this process is serving.
+//
+// Present and Count are separate for the reason CategoryHealth's are, with one
+// difference in what they mean. Present false is an artifact older than the
+// column — a rollback target, expected to be served that way, and the state in
+// which ?landmark= is refused outright. Present with Count zero is an artifact
+// where the column exists and no row carries the flag.
+//
+// That second state is *not* an upstream invariant violation the way an empty
+// category vocabulary is: validate.py invariant 14 pins every value to 0 or 1
+// and deliberately sets no target fraction, because the flag is an editorial
+// judgement. So a release should warn on it rather than refuse it — but it must
+// be able to see it, because it empties the one UI control the flag exists for
+// and nothing else in the system would notice.
+//
+// Count is landmarks, not rows: it is the number ?landmark=true would return.
+type LandmarkHealth struct {
+	Present bool  `json:"present"`
+	Count   int64 `json:"count"`
 }
 
 // CategoryHealth reports the category vocabulary this process is serving.
@@ -123,6 +145,10 @@ func buildHealthSnapshot(dbs map[string]struct {
 		// before it builds this snapshot, and a missing entry reports the same
 		// zero value an artifact with no column does — the safe direction.
 		vocab := categoriesByLang[lang]
+		// Read from what loadLandmark put in landmarkByLang for the same reason,
+		// and loaded at the same point in main() — so /health cannot report a
+		// flag the filter is not the one consulting.
+		flag := landmarkByLang[lang]
 
 		snapshot.Databases[lang] = DatabaseHealth{
 			Path:   resolved,
@@ -132,6 +158,10 @@ func buildHealthSnapshot(dbs map[string]struct {
 			Categories: CategoryHealth{
 				Present: vocab.present,
 				Count:   len(vocab.sorted),
+			},
+			Landmark: LandmarkHealth{
+				Present: flag.present,
+				Count:   flag.count,
 			},
 		}
 	}

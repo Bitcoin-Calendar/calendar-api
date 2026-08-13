@@ -88,14 +88,39 @@ There is no `PORT` variable any more; use `LISTEN_ADDR`.
     `--allow-schema-drift` if you have decided to publish data ahead of the binary;
 5.  flips the symlink and restarts — the restart is mandatory, SQLite holds an open file
     descriptor and flipping alone leaves the old inode being served;
-6.  verifies `/health` names the new release, that its hashes match what was published, and
-    that every row is indexed in both languages;
+6.  verifies `/health` names the new release, that its hashes match what was published, that
+    every row is indexed in both languages, and that the category vocabulary and the landmark
+    flag are what the artifact carries;
 7.  asserts search still returns hits for `биткоин` and `bitcoin` — the only check here that
     would catch a tokenizer change, and the Cyrillic one is the case that actually breaks;
 8.  prunes old releases, keeping `--keep N` (default 5).
 
 **Any failure after the symlink flip rolls back automatically** to the previous release and
 restarts it. A rejected release directory is left in place for inspection.
+
+### When a release adds a column, ship the binary first
+
+`publish-api.sh` **then** `publish-db.sh`. Follow that order because it is free, not because
+the other one breaks something.
+
+Binary-first always works, by construction: the service is built to serve an artifact older
+than itself. A new binary against an artifact lacking `category` or `landmark` boots, answers
+every endpoint, renders the missing field as its zero value, and rejects only the filter it
+genuinely cannot answer. That is the same property that lets a rollback work at all, and it is
+covered by tests. So there is never a reason to reach for the other order.
+
+Data-first is not an outage either — it just does nothing useful for a while. The new column
+ships inside the artifact and reaches no response until the binary catches up, and no client
+sees a wrong answer in the meantime, because nothing consumes this API today except the
+Telegram bot, which reads neither column. The cost is that the flag is invisible and you may
+not notice it is invisible.
+
+That is worth one sentence of care because step 4b will not catch it. The schema guard runs
+the API's test from the *local* repo, so it proves the staged artifact matches the checkout on
+your laptop; it knows nothing about how old the binary on the box is, and passes green either
+way. What does report it is `/health`: `publish-db.sh` warns when the running binary carries no
+`categories` or no `landmark` block, meaning the binary predates the field — rather than
+letting a silently skipped check read as a passing one.
 
 The `deploy` user owns the artifacts but cannot be logged into (`nologin`, no home, no keys) —
 it exists so that `bitcal` cannot write them. Publishing therefore connects as `root` and
@@ -182,6 +207,12 @@ As a single assertion for a release check:
 curl -sf localhost:3000/health | jq -e '
   .status == "ok" and (.databases | to_entries | all(.value.fts.consistent))'
 ```
+
+Deliberately no assertion on `categories.count` or `landmark.count` here. Both are properties
+of the data, not of the deployment: the vocabulary went from 15 values to 8 on 2026-08-12 and
+the landmark count moves whenever the owner re-judges a row, so a number pinned in a release
+check is a check that fails for the wrong reason. Assert `present`, or that the count is
+non-zero, and read the counts `publish-db.sh` prints.
 
 ## Troubleshooting
 

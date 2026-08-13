@@ -170,11 +170,25 @@ func eventRow(t *testing.T, path, id string) map[string]any {
 	return out
 }
 
-// isNullOrEmpty reports whether a JSON value carries nothing — the two shapes a
-// dropped column takes, depending on whether its Go field is a pointer.
+// isNullOrEmpty reports whether a JSON value carries nothing — the shapes a
+// dropped column takes, which depend on the Go field's type.
+//
+// `false` and `0` are in the list, and they are the reason this comment is
+// longer than the function. A Go bool field the SELECT never fetched marshals
+// to `false`, exactly like one fetched from a row storing 0; an int field
+// marshals to `0` the same way. Without them, `landmark` would have been
+// "proven" by any row storing 0 — which is 179 of 581 RU rows — so the whole
+// guard would have passed against a search handler that never selected the
+// column, which is precisely the bug it was written for after `category`
+// shipped that way. Only a `true` proves a boolean column was really fetched.
+//
+// The cost is that a column whose every row is false or 0 can never be proven,
+// and the test then reports it as emitted-but-never-valued. That is the right
+// direction to fail in: the fixture is ours to fix, and a fixture with no true
+// row genuinely cannot distinguish the two cases.
 func isNullOrEmpty(raw json.RawMessage) bool {
 	s := strings.TrimSpace(string(raw))
-	return s == "" || s == "null" || s == `""`
+	return s == "" || s == "null" || s == `""` || s == "false" || s == "0"
 }
 
 // TestFixtureSchemaMatchesCanonical closes the loop that TestEventStructCovers-

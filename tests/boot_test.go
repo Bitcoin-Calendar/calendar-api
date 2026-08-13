@@ -33,6 +33,10 @@ type healthDoc struct {
 			Present bool `json:"present"`
 			Count   int  `json:"count"`
 		} `json:"categories"`
+		Landmark struct {
+			Present bool  `json:"present"`
+			Count   int64 `json:"count"`
+		} `json:"landmark"`
 	} `json:"databases"`
 }
 

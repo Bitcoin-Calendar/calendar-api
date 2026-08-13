@@ -83,7 +83,8 @@ client, because they have changed:
 | `media` | string \| null | A JSON array encoded as a string, or `null` when the event has no media. Never `""` and never `"[]"` — absence is exactly one value. |
 | `references` | string \| null | Same encoding and same null rule as `media`. |
 | `url_path` | string | `/<date>/<slug>/`, e.g. `"/2013-08-09/hal-finneys-last-post/"`. The site's page path and the cross-language join key. **Note the leading slash** — joining it onto a base URL with another `/` yields a double slash. |
-| `category` | string | The event's single classification. Always present, never empty, always one of a closed set — but **the set is owned by the data, not by this API, and it grows**: `security` was added on 2026-08-10, a day after the column itself. Treat an unrecognised value as valid and render it; do not hardcode the list into a client. As of 2026-08-10 it is: `archives`, `bitcoin`, `first`, `holiday`, `legal`, `lightning`, `macro`, `mining`, `mustread`, `obituary`, `price`, `privacy`, `scam`, `security`, `software`. **Do not derive it from `tags[0]`** — that inference used to work and is now wrong, because tag order carries no meaning. In particular `bitcoin` is a category with no corresponding tag left in the data at all, so `/api/events/tags/bitcoin` returns nothing while 132 RU and 66 EN events are `category: "bitcoin"`. |
+| `category` | string | The event's single classification. Always present, never empty, always one of a closed set — but **the set is owned by the data, not by this API, and it changes in both directions**. It gained `security` on 2026-08-10, and on 2026-08-12 it was rewritten from fifteen values down to eight. Treat an unrecognised value as valid and render it; do not hardcode the list into a client. As of 2026-08-12 it is: `adoption`, `archives`, `fiat`, `freedom`, `holiday`, `obituary`, `reading`, `tech`. **Do not derive it from `tags[0]`** — that inference used to work and is now wrong, because tag order carries no meaning. Note that the tag and category vocabularies do not correspond: `first` is a tag on ~104 rows and a category on none (it was a category until 2026-08-12), and `bitcoin` is now neither. |
+| `landmark` | boolean | Whether this event is one of the events that matter to a bitcoiner — the flag behind the site's "Только главное" switch. Always present, always `true` or `false`, **never `null`**. It is orthogonal to `category`: 402 of 581 RU and 394 of 565 EN events carry it, spread across every category. Added 2026-08-12; against a database artifact published before then the service reports `false` for every event, and `/health` says `landmark.present: false`. |
 | `created_at` | string \| null | RFC 3339, or `null`. Bookkeeping about the row, not about the event; most rows have no value. |
 | `updated_at` | string \| null | Same. |
 
@@ -98,6 +99,7 @@ client, because they have changed:
   "references": "[\"https://web.archive.org/web/20240207194838/https://bitcointalk.org/...\"]",
   "url_path": "/2013-08-09/hal-finneys-last-post/",
   "category": "archives",
+  "landmark": true,
   "created_at": null,
   "updated_at": null
 }
@@ -123,9 +125,10 @@ Tag matching on `/events/tags/:tag` is case-insensitive.
 > | `econ` | never existed | `economics` |
 > | `clownworld` | retired from the data | — |
 >
-> Separately, **`bitcoin` is not a tag.** It was retired from every row and now exists only as
-> a `category`, so `/api/events/tags/bitcoin` returns an empty list. See the `category` field
-> above.
+> Separately, **`bitcoin` is neither a tag nor a category.** It was retired from every row's
+> tags, survived for two days as a `category`, and was dissolved from that too on 2026-08-12.
+> `/api/events/tags/bitcoin` returns an empty list and `?category=bitcoin` is a `400`. See the
+> `category` field above.
 
 The most-used tags, by event count as of 2026-08-10 (English; Russian is within a row or two):
 
@@ -263,7 +266,8 @@ Error responses will typically be in JSON format, like:
     *   `year` (optional, string, format: `YYYY` e.g., "2022"): Year for filtering events.
     *   `month` (optional, string, format: `MM` or `M` e.g., "05" or "5"): Month for filtering events.
     *   `day` (optional, string, format: `DD` or `D` e.g., "27" or "7"): Day for filtering events.
-    *   `category` (optional, string): Return only events with this category. Case-insensitive. **An unrecognised value is a `400`**, not an empty list — see *Rejected input*. Combines with the date filters (they AND together), so `?category=bitcoin&month=5` is "bitcoin events in May". Call `/api/categories` for the valid values and their counts; the service derives them from the artifact at startup, so a category canonical adds is accepted as soon as its data is published.
+    *   `category` (optional, string): Return only events with this category. Case-insensitive. **An unrecognised value is a `400`**, not an empty list — see *Rejected input*. Combines with the date filters (they AND together), so `?category=tech&month=5` is "tech events in May". Call `/api/categories` for the valid values and their counts; the service derives them from the artifact at startup, so a category canonical adds is accepted as soon as its data is published — and one it removes is rejected from the same moment.
+    *   `landmark` (optional, boolean): Return only events whose `landmark` flag matches. Accepts `true`/`false` and the other spellings Go's `strconv.ParseBool` takes (`1`, `0`, `t`, `f`, `True`, `FALSE`, …); anything else is a `400`. ANDs with `category` and the date filters, so `?category=tech&landmark=true` is "the tech events that matter". Against an artifact published before 2026-08-12 the column does not exist and **any** value is a `400` explaining that — never a silently empty list. Check `/health` → `databases.<lang>.landmark.present` if you need to know in advance.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
@@ -280,7 +284,8 @@ Error responses will typically be in JSON format, like:
               "media": null,
               "references": "[\"https://bitcoin.org/bitcoin.pdf\"]",
               "url_path": "/2008-11-01/bitcoin-whitepaper-published/",
-              "category": "mustread",
+              "category": "reading",
+              "landmark": true,
               "created_at": null,
               "updated_at": null
             }
@@ -395,7 +400,8 @@ Error responses will typically be in JSON format, like:
             "media": null,
             "references": "[\"https://bitcoin.org/bitcoin.pdf\"]",
             "url_path": "/2008-11-01/bitcoin-whitepaper-published/",
-            "category": "mustread",
+            "category": "reading",
+            "landmark": true,
             "created_at": null,
             "updated_at": null
           }
@@ -473,12 +479,12 @@ Error responses will typically be in JSON format, like:
         {
           "data": [
             {
-              "category": "archives",
-              "count": 89
+              "category": "adoption",
+              "count": 102
             },
             {
-              "category": "bitcoin",
-              "count": 66
+              "category": "archives",
+              "count": 100
             }
             // ... more categories
           ]
@@ -499,7 +505,7 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/categories?lang=en"
 
     # Then filter by one
-    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?lang=en&category=bitcoin&limit=5"
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?lang=en&category=adoption&landmark=true&limit=5"
     ```
 
 ### 6. Get Events by Tag (Paginated)
@@ -530,7 +536,8 @@ Error responses will typically be in JSON format, like:
               "media": "[\"https://example.com/pizza.webp\"]",
               "references": "[\"https://bitcointalk.org/...\"]",
               "url_path": "/2010-05-22/bitcoin-pizza-day/",
-              "category": "bitcoin",
+              "category": "adoption",
+              "landmark": true,
               "created_at": "2026-08-08T09:59:56Z",
               "updated_at": "2026-08-08T09:59:56Z"
             }
@@ -580,14 +587,16 @@ Error responses will typically be in JSON format, like:
           "sha256": "6abda1c576b81220538b35d2d697064ac5a0ea72ecc6772d9c58832cdcf8f80e",
           "rows": 565,
           "fts": { "indexed": 565, "consistent": true },
-          "categories": { "present": true, "count": 15 }
+          "categories": { "present": true, "count": 8 },
+          "landmark": { "present": true, "count": 394 }
         },
         "ru": {
           "path": "/srv/bitcal/data/releases/20260810T191227Z/events_ru.db",
           "sha256": "12a5f04093e31ceb0a34cf44b60f4d5758869c96e990bb5b840ac3f983b45ba4",
           "rows": 581,
           "fts": { "indexed": 581, "consistent": true },
-          "categories": { "present": true, "count": 15 }
+          "categories": { "present": true, "count": 8 },
+          "landmark": { "present": true, "count": 402 }
         }
       }
     }
@@ -606,13 +615,21 @@ Error responses will typically be in JSON format, like:
 | `fts.consistent` | `fts.indexed == rows` — every event is reachable by `/api/search`. |
 | `categories.present` | Whether the artifact has a `category` column at all. `false` means it predates 2026-08-09. |
 | `categories.count` | Distinct categories the service read from it at startup — the exact set `?category=` validates against, and the same list `/api/categories` returns. |
+| `landmark.present` | Whether the artifact has a `landmark` column at all. `false` means it predates 2026-08-12; every event then reports `landmark: false` and `?landmark=` is rejected. |
+| `landmark.count` | Events carrying the flag — exactly what `?landmark=true` returns. |
 
-`categories` is the one part of this document that describes the artifact's *contents* rather
-than its shape, and it is here for the release check: when `count` is `0`, every `?category=`
-is rejected and `/api/categories` is empty, and nothing else outside the boot log says so.
-The two fields are separate because they mean different things — `present: false` is an
-artifact older than the column, which is a legitimate rollback target; `present: true` with
-`count: 0` is a column no row carries a value in, which should never have been published.
+`categories` and `landmark` are the parts of this document that describe the artifact's
+*contents* rather than its shape, and they are here for the release check: nothing else
+outside the boot log reports either. In both, the two fields are separate because they mean
+different things — `present: false` is an artifact older than the column, which is a
+legitimate rollback target; `present: true` with `count: 0` is a column no row carries a value
+in.
+
+They differ in how bad `count: 0` is. For `categories` it should never have been published:
+every `?category=` is rejected and `/api/categories` is empty, and `publish-db.sh` refuses to
+leave a release in that state. For `landmark` it is legal data — the validator pins every
+value to 0 or 1 but sets no target fraction, because the flag is an editorial judgement — so
+`?landmark=true` simply answers an empty list, and the publisher warns rather than failing.
 
 #### On the status code
 
@@ -622,9 +639,10 @@ completeness of search, and returning a failure code would have a load balancer 
 no good reason. **Read the `status` field, not the HTTP code.**
 
 `status` reports full-text coverage only. An absent or empty category vocabulary does **not**
-make it `degraded`: serving an artifact that predates the column is what a rollback looks
-like, and a dashboard alarming for the duration of one is pressure to end the rollback rather
-than to fix the release. Read `categories` for that.
+make it `degraded`, and neither does an absent or unset `landmark` column: serving an artifact
+that predates either is what a rollback looks like, and a dashboard alarming for the duration
+of one is pressure to end the rollback rather than to fix the release. Read `categories` and
+`landmark` for that.
 
 The states that would make search useless rather than incomplete — the index missing, empty,
 or unreadable — are not reported here at all, because the service refuses to start on them.
