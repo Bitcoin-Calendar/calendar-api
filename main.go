@@ -15,13 +15,11 @@ import (
 	"syscall"
 	"time" // Added for rate limiter
 
-	"github.com/gofiber/adaptor/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"    // Added for CORS support
 	"github.com/gofiber/fiber/v2/middleware/limiter" // Added for rate limiting
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	zlog "github.com/rs/zerolog/log"
 	"gorm.io/gorm" // Added for gorm.ErrRecordNotFound
@@ -1014,7 +1012,7 @@ func main() {
 		// up as a map key in the limiter's store, and a secret does not belong
 		// in a data structure that a future dump, metric or log line might
 		// expose. Unauthenticated requests fall back to the IP, which is what
-		// /health and /metrics use.
+		// /health uses.
 		KeyGenerator: func(c *fiber.Ctx) string {
 			if k := c.Get("X-API-KEY"); k != "" {
 				sum := sha256.Sum256([]byte(k))
@@ -1053,13 +1051,7 @@ func main() {
 	api.Get("/events/tags/:tag", timeout.NewWithContext(getEventsByTagHandler, queryTimeout))
 	api.Get("/events", timeout.NewWithContext(getAllEventsHandler, queryTimeout))
 
-	// New FTS5 search endpoint, replacing the old /search
 	api.Get("/search", timeout.NewWithContext(ftsSearchHandler, queryTimeout))
-
-	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
-
-	// Set up Fiber app
-	app.Static("/", "./docs") // Serve Swagger UI
 
 	// Listen on its own goroutine so this one can wait for a signal.
 	// Listen returns nil once Shutdown has run, so a non-nil error here is a
