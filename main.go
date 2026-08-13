@@ -3,26 +3,26 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle" // Added for secure API key comparison
+	"crypto/subtle"
 	"encoding/hex"
-	"errors" // Added for gorm.ErrRecordNotFound
+	"errors"
 	"fmt"
-	"log" // Added for log.Fatal
+	"log"
 	"os"
 	"os/signal"
-	"strconv" // Added for pagination
-	"strings" // Added for tag processing
+	"strconv"
+	"strings"
 	"syscall"
-	"time" // Added for rate limiter
+	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"    // Added for CORS support
-	"github.com/gofiber/fiber/v2/middleware/limiter" // Added for rate limiting
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
 	"github.com/rs/zerolog"
 	zlog "github.com/rs/zerolog/log"
-	"gorm.io/gorm" // Added for gorm.ErrRecordNotFound
+	"gorm.io/gorm"
 )
 
 // Timeouts. Nothing here should take milliseconds, let alone seconds: the
@@ -46,7 +46,7 @@ const (
 	shutdownTimeout = 10 * time.Second
 )
 
-// Define global DB variables for English and Russian databases
+// The two open database handles, one per language artifact.
 var DB_EN *gorm.DB
 var DB_RU *gorm.DB
 
@@ -68,20 +68,17 @@ func resolveLang(langCode string) string {
 	return "en"
 }
 
-// Helper function to get the correct DB instance based on language
-func getDBInstance(langCode string) *gorm.DB {
-	if resolveLang(langCode) == "ru" {
-		return DB_RU
-	}
-	return DB_EN // Default to English
-}
-
 // dbFor returns the language's database bound to the request's context, so a
 // query cannot outlive the request that asked for it. Handlers must use this
-// rather than getDBInstance directly: without the context, go-sqlite3 never
-// checks for cancellation and a runaway query runs until the process dies.
+// rather than reach for DB_EN/DB_RU directly: without the context, go-sqlite3
+// never checks for cancellation and a runaway query runs until the process
+// dies.
 func dbFor(c *fiber.Ctx) *gorm.DB {
-	return getDBInstance(c.Query("lang", "en")).WithContext(c.UserContext())
+	db := DB_EN
+	if resolveLang(c.Query("lang", "en")) == "ru" {
+		db = DB_RU
+	}
+	return db.WithContext(c.UserContext())
 }
 
 // isNumericInRange reports whether s is a plain integer within [lo, hi].
@@ -272,23 +269,24 @@ func queryFailed(c *fiber.Ctx, err error, message string) error {
 	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": message})
 }
 
-// Define a response structure for paginated events, matching your spec
+// PaginatedEventsResponse is the body every paginated list endpoint answers
+// with.
 type PaginatedEventsResponse struct {
-	Events     []Event     `json:"events"`     // Changed from Data json:"data"
-	Pagination interface{} `json:"pagination"` // Using interface{} for flexibility initially
+	Events     []Event        `json:"events"`
+	Pagination PaginationData `json:"pagination"`
 }
 
 type PaginationData struct {
-	CurrentPage int   `json:"current_page"` // Was Page       int   `json:"page"`
-	PerPage     int   `json:"per_page"`     // Was Limit      int   `json:"limit"`
-	Total       int64 `json:"total"`        // GORM Count returns int64
-	LastPage    int   `json:"last_page"`    // Was TotalPages int   `json:"total_pages"`
+	CurrentPage int   `json:"current_page"`
+	PerPage     int   `json:"per_page"`
+	Total       int64 `json:"total"` // GORM Count returns int64
+	LastPage    int   `json:"last_page"`
 }
 
-// var expectedAPIKey []byte // Old: single API key
-var validAPIKeys [][]byte // New: slice to hold multiple valid API keys
+// validAPIKeys holds the accepted keys, parsed from API_KEYS at boot.
+var validAPIKeys [][]byte
 
-// authMiddleware checks for a valid API key
+// authMiddleware checks for a valid API key.
 func authMiddleware(c *fiber.Ctx) error {
 	providedKey := c.Get("X-API-KEY")
 	if providedKey == "" {
@@ -297,7 +295,6 @@ func authMiddleware(c *fiber.Ctx) error {
 
 	providedKeyBytes := []byte(providedKey)
 	for _, expectedKey := range validAPIKeys {
-		// Securely compare the provided key with each of the expected keys
 		if subtle.ConstantTimeCompare(providedKeyBytes, expectedKey) == 1 {
 			return c.Next()
 		}
@@ -306,20 +303,13 @@ func authMiddleware(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid API key"})
 }
 
-// New handler function for getting a single event
+// Handler for /api/events/:id
 func getEventHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en' if not specified
+	lang := c.Query("lang", "en")
 	db := dbFor(c)
 	id := c.Params("id")
 
 	zlog.Info().Str("id", id).Str("lang", lang).Msg("getEventHandler called")
-
-	if id == "" {
-		zlog.Warn().Str("lang", lang).Msg("getEventHandler: Event ID is required")
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Event ID is required",
-		})
-	}
 
 	eventID, err := strconv.ParseUint(id, 10, 32)
 	if err != nil {
@@ -412,7 +402,7 @@ ORDER BY
 
 // Handler for /api/tags
 func getTagsHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en' if not specified
+	lang := c.Query("lang", "en")
 	db := dbFor(c)
 
 	zlog.Info().Str("lang", lang).Msg("getTagsHandler called")
@@ -424,12 +414,6 @@ func getTagsHandler(c *fiber.Ctx) error {
 	// start; this one is its sibling and must not answer in a different shape.
 	// Reachable only on an artifact where no row carries a usable tag.
 	result := []TagInfo{}
-	// SQL query to extract, count, and lowercase tags directly from JSON arrays in the 'tags' column.
-	// This approach assumes tags are stored as valid JSON arrays (e.g., ["tag1", "tag2"]).
-	// It replaces the previous Go-based parsing and aggregation logic.
-	// Note: Fallback for comma-separated tags is removed with this SQL-native approach.
-	// If tags are not valid JSON arrays, or if individual tags within the array are empty/whitespace-only,
-	// they will be ignored by this query.
 	// NOTHING MAY FOLLOW THE FINAL SEMICOLON — not even a comment. SQLite
 	// prepares the text after it as a further statement, and a comment-only
 	// statement prepares successfully to a NULL handle. go-sqlite3 then steps
@@ -469,26 +453,17 @@ ORDER BY
 		return queryFailed(c, err, "Failed to retrieve tags from database")
 	}
 
-	// Sorting is now handled by the SQL query's "ORDER BY tag ASC".
-	// The result slice is already in the correct []TagInfo format.
 	zlog.Info().Int("tag_count", len(result)).Str("lang", lang).Msg("getTagsHandler: Successfully retrieved tags")
 	return c.JSON(fiber.Map{"data": result})
 }
 
-// Handler for /api/events/tags/{tag}
+// Handler for /api/events/tags/:tag
 func getEventsByTagHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en' if not specified
+	lang := c.Query("lang", "en")
 	db := dbFor(c)
 	tagParam := c.Params("tag")
 
 	zlog.Info().Str("tag", tagParam).Str("lang", lang).Msg("getEventsByTagHandler called")
-
-	if tagParam == "" {
-		zlog.Warn().Str("lang", lang).Msg("getEventsByTagHandler: Tag parameter is required")
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Tag parameter is required",
-		})
-	}
 
 	// The tag filter does not compose with the category or landmark filters.
 	// See filterParamRejected.
@@ -523,8 +498,6 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	)`
 	searchTag := strings.ToLower(tagParam)
 
-	// Get total count of events matching the tag
-	// We need to apply the Where condition for Count as well.
 	countQuery := db.Model(&Event{}).Where(tagMatch, searchTag)
 	if err := countQuery.Count(&totalEvents).Error; err != nil {
 		zlog.Error().Str("tag", tagParam).Str("lang", lang).Err(err).Msg("getEventsByTagHandler: Failed to count events by tag")
@@ -553,7 +526,7 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 	})
 }
 
-// Handler for getting all events (replaces the inline function in main)
+// Handler for /api/events
 func getAllEventsHandler(c *fiber.Ctx) error {
 	lang := c.Query("lang", "en")
 	db := dbFor(c)
@@ -661,13 +634,11 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 		query = query.Where("landmark = ?", want)
 	}
 
-	// First, get the total count of records that match the filter
 	if err := query.Count(&totalEvents).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getAllEventsHandler: Failed to count events")
 		return queryFailed(c, err, "Failed to count events")
 	}
 
-	// Then, apply pagination and retrieve the events
 	if err := query.Order(eventOrder).Limit(limit).Offset(offset).Find(&events).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getAllEventsHandler: Failed to retrieve events")
 		return queryFailed(c, err, "Failed to retrieve events")
@@ -688,9 +659,9 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 	})
 }
 
-// Handler for FTS5 search
+// Handler for /api/search
 func ftsSearchHandler(c *fiber.Ctx) error {
-	lang := c.Query("lang", "en") // Default to 'en' if not specified
+	lang := c.Query("lang", "en")
 	db := dbFor(c)
 	query := c.Query("q")
 
