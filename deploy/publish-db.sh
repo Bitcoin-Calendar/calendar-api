@@ -195,7 +195,24 @@ step "Local preflight"
 
 VALIDATOR="$(cd "$SOURCE_DIR/.." && pwd)/validate.py"
 BASELINE="$(dirname "$VALIDATOR")/validate-baseline.json"
+# The category vocabulary, which validate.py resolves as
+# `Path(__file__).parent / "categories.json"` and refuses to run without —
+# deliberately, since validating against an empty set would make every category
+# legal. It became a dependency on 2026-08-12, when the vocabulary stopped being
+# a literal in the validator and moved to a file the validator and the website
+# both read.
+#
+# Checked here rather than where it is copied, because that is the whole point
+# of this step: it is a property of the source tree, so discovering it costs
+# nothing now and costs a staged-but-unpublishable release later. That is not
+# hypothetical — release 20260813T054029Z staged, copied, checksummed, and then
+# failed remote validation with `categories.json is missing`, because this
+# script shipped the validator without it.
+CATEGORY_FILE="$(dirname "$VALIDATOR")/categories.json"
 [ -f "$VALIDATOR" ] || die "validate.py not found next to the source: $VALIDATOR"
+[ -f "$CATEGORY_FILE" ] || die "categories.json not found next to the validator: $CATEGORY_FILE
+       validate.py reads the category vocabulary from it and will not run without
+       it. Regenerate it in the canonical repo with: ruby tools/build-categories.rb"
 
 for f in "${DBS[@]}" SHA256SUMS; do
 	[ -f "$SOURCE_DIR/$f" ] || die "missing from source: $SOURCE_DIR/$f"
@@ -409,9 +426,16 @@ step "Validating the staged copy"
 
 REMOTE_TMP=$(remote "mktemp -d /tmp/bitcal-validate.XXXXXX")
 copy_to "$VALIDATOR" "$SSH_HOST:$REMOTE_TMP/validate.py"
-# The baseline must travel with it: validate.py resolves it next to its own
-# file, and without it every baselined known-open item reads as a new
-# regression and the run fails for the wrong reason.
+# Both of the validator's siblings must travel with it, because it resolves each
+# one next to its own file and it is running from a temp directory on the box.
+#
+# They are not equally important, which is why one warns and one is already a
+# hard failure in preflight. Without the baseline, every baselined known-open
+# item reads as a new regression and the run fails for the wrong reason — bad,
+# but the validator still runs. Without categories.json it does not start at
+# all.
+copy_to "$CATEGORY_FILE" "$SSH_HOST:$REMOTE_TMP/categories.json" \
+	|| die "could not copy categories.json to the box; validate.py cannot run without it"
 if [ -f "$BASELINE" ]; then
 	copy_to "$BASELINE" "$SSH_HOST:$REMOTE_TMP/validate-baseline.json"
 else
