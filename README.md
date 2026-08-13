@@ -46,10 +46,11 @@ Everything under `/api` requires an `X-API-KEY` header. `/health` does not.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Which artifact this process has open, and whether it is fully indexed. Unauthenticated. |
-| `GET /api/events` | Events, paginated. Filter with `year`, `month`, `day`. |
+| `GET /api/events` | Events, paginated. Filter with `year`, `month`, `day`, `category`, `landmark`. |
 | `GET /api/events/:id` | One event. |
 | `GET /api/events/tags/:tag` | Events carrying a tag. |
 | `GET /api/tags` | Every tag with the number of events carrying it. |
+| `GET /api/categories` | Every category with the number of events carrying it. |
 | `GET /api/search?q=` | Full-text search over title, description and tags. |
 
 All of them take `lang=en` (default) or `lang=ru`. Full detail, including every field and

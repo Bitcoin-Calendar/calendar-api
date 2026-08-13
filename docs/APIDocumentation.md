@@ -292,10 +292,10 @@ Error responses will typically be in JSON format, like:
             // ... more events
           ],
           "pagination": {
-            "current_page": 1, // Note: field names changed
-            "per_page": 20,    // Note: field names changed
+            "current_page": 1,
+            "per_page": 20,
             "total": 230,
-            "last_page": 12    // Note: field names changed
+            "last_page": 12
           }
         }
         ```
@@ -344,7 +344,7 @@ Error responses will typically be in JSON format, like:
     *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
     *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
-    *   `category`: **not supported here** — sending it is a `400`, not a silently unfiltered result. Search does not narrow by category; put the term in `q`, or filter on `/events`.
+    *   `category`, `landmark`: **not supported here** — sending either is a `400`, not a silently unfiltered result. Search does not narrow by category or landmark; put the term in `q`, or filter on `/events`.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
@@ -519,7 +519,7 @@ Error responses will typically be in JSON format, like:
     *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
     *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
-    *   `category`: **not supported here** — sending it is a `400`. This endpoint filters by tag only. `category` and `tags` are different fields, so there is no equivalent to narrowing one by the other; filter by category on `/events` instead.
+    *   `category`, `landmark`: **not supported here** — sending either is a `400`. This endpoint filters by tag only; filter by category or landmark on `/events` instead.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
