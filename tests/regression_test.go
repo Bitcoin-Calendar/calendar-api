@@ -90,16 +90,35 @@ var sqlSort = regexp.MustCompile(`(?is)ORDER\s+BY\s+(.*?)(?:\s+LIMIT\b|;|$)`)
 // boundaries for an unstable order to fall across, which is why /api/tags
 // sorting by its GROUP BY key alone is fine and is not flagged here.
 func TestPaginatedSortsBreakTies(t *testing.T) {
-	src, err := os.ReadFile("../main.go")
+	// Every source file, not a named one: the handlers live in per-feature
+	// files, and a sort added to a new file must not be born unchecked.
+	paths, err := filepath.Glob("../*.go")
 	if err != nil {
-		t.Fatalf("reading main.go: %v", err)
+		t.Fatalf("glob: %v", err)
 	}
-	source := string(src)
+	var sources []string
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("reading %s: %v", p, err)
+		}
+		sources = append(sources, string(src))
+	}
+	if len(sources) == 0 {
+		t.Fatal("found no source files to scan")
+	}
 
-	// Resolve string constants so a sort named by identifier can be read.
+	// Resolve string constants across the whole package first, so a sort named
+	// by an identifier declared in another file — .Order(eventOrder) — can be
+	// read wherever it is used.
 	consts := map[string]string{}
-	for _, m := range packageConst.FindAllStringSubmatch(source, -1) {
-		consts[m[1]] = m[2]
+	for _, source := range sources {
+		for _, m := range packageConst.FindAllStringSubmatch(source, -1) {
+			consts[m[1]] = m[2]
+		}
 	}
 
 	checked := 0
@@ -114,33 +133,35 @@ func TestPaginatedSortsBreakTies(t *testing.T) {
 		}
 	}
 
-	// GORM sorts, whether written inline or by way of a constant.
-	for _, m := range goSort.FindAllStringSubmatch(source, -1) {
-		arg := strings.TrimSpace(m[1])
-		sort, ok := consts[arg]
-		if !ok {
-			sort = strings.Trim(arg, `"`)
-		}
-		requireTiebreak(".Order("+arg+")", sort)
-	}
-
-	// Raw SQL sorts, but only where the statement also paginates.
-	for _, m := range rawString.FindAllStringSubmatch(source, -1) {
-		stmt := m[1]
-		if !strings.Contains(strings.ToUpper(stmt), "OFFSET") {
-			continue
-		}
-		for _, s := range sqlSort.FindAllStringSubmatch(stmt, -1) {
-			// Strip SQL comments: the sort list in this service is annotated,
-			// and a comment mentioning "id" would satisfy the check on its own.
-			sort := ""
-			for _, line := range strings.Split(s[1], "\n") {
-				if i := strings.Index(line, "--"); i >= 0 {
-					line = line[:i]
-				}
-				sort += " " + line
+	for _, source := range sources {
+		// GORM sorts, whether written inline or by way of a constant.
+		for _, m := range goSort.FindAllStringSubmatch(source, -1) {
+			arg := strings.TrimSpace(m[1])
+			sort, ok := consts[arg]
+			if !ok {
+				sort = strings.Trim(arg, `"`)
 			}
-			requireTiebreak("a paginated raw query", strings.TrimSpace(sort))
+			requireTiebreak(".Order("+arg+")", sort)
+		}
+
+		// Raw SQL sorts, but only where the statement also paginates.
+		for _, m := range rawString.FindAllStringSubmatch(source, -1) {
+			stmt := m[1]
+			if !strings.Contains(strings.ToUpper(stmt), "OFFSET") {
+				continue
+			}
+			for _, s := range sqlSort.FindAllStringSubmatch(stmt, -1) {
+				// Strip SQL comments: the sort list in this service is annotated,
+				// and a comment mentioning "id" would satisfy the check on its own.
+				sort := ""
+				for _, line := range strings.Split(s[1], "\n") {
+					if i := strings.Index(line, "--"); i >= 0 {
+						line = line[:i]
+					}
+					sort += " " + line
+				}
+				requireTiebreak("a paginated raw query", strings.TrimSpace(sort))
+			}
 		}
 	}
 

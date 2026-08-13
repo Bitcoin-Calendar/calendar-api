@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
+	zlog "github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 )
 
@@ -146,4 +148,62 @@ func (c categorySet) expected() string {
 	s := append([]string(nil), c.sorted...)
 	sort.Strings(s)
 	return "one of: " + strings.Join(s, ", ")
+}
+
+// Structure for the /api/categories response
+type CategoryInfo struct {
+	Category string `json:"category"`
+	Count    int    `json:"count"`
+}
+
+// Handler for /api/categories — the counterpart to /api/tags, and what a client
+// needs to build a filter UI without fetching every event to discover what
+// exists.
+//
+// Simpler than getTagsHandler in one way that matters: tags are a JSON array,
+// so that query joins through json_each and must COUNT(DISTINCT e.id) to avoid
+// counting a row twice when it lists a tag twice. category is exactly one value
+// per row, so a plain COUNT(*) is already an event count and cannot disagree
+// with /api/events?category=.
+func getCategoriesHandler(c *fiber.Ctx) error {
+	lang := c.Query("lang", "en")
+	db := dbFor(c)
+
+	zlog.Info().Str("lang", lang).Msg("getCategoriesHandler called")
+
+	// An artifact predating the category column has nothing to report, and the
+	// statement below would fail against it with `no such column`. Answering the
+	// empty list is the truth — this artifact carries no categories — and a 500
+	// on an endpoint the service can perfectly well answer is not.
+	if !categoriesByLang[resolveLang(lang)].present {
+		return c.JSON(fiber.Map{"data": []CategoryInfo{}})
+	}
+
+	// Initialised, not declared nil, for the reason ftsSearchHandler spells out:
+	// Raw().Scan() leaves the slice nil when nothing matches and a nil slice
+	// marshals to JSON null, so a caller would get null from one branch of this
+	// handler and [] from the other.
+	result := []CategoryInfo{}
+	// NOTHING MAY FOLLOW THE FINAL SEMICOLON — see getTagsHandler for what a
+	// trailing comment does to this driver. It is not a style rule.
+	sqlQuery := `
+SELECT
+    LOWER(TRIM(category)) AS category,
+    COUNT(*) AS count
+FROM
+    events
+WHERE
+    category IS NOT NULL
+    AND TRIM(category) != ''
+GROUP BY
+    LOWER(TRIM(category))
+ORDER BY
+    category ASC;`
+	if err := db.Raw(sqlQuery).Scan(&result).Error; err != nil {
+		zlog.Error().Str("lang", lang).Err(err).Msg("getCategoriesHandler: Error executing raw SQL for categories")
+		return queryFailed(c, err, "Failed to retrieve categories from database")
+	}
+
+	zlog.Info().Int("category_count", len(result)).Str("lang", lang).Msg("getCategoriesHandler: Successfully retrieved categories")
+	return c.JSON(fiber.Map{"data": result})
 }
