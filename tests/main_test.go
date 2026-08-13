@@ -154,6 +154,17 @@ func seedArtifact(path, lang string) error {
 	}
 	defer db.Close()
 
+	// `landmark INTEGER NOT NULL DEFAULT 0` is exactly how canonical declares
+	// it, because the declared type is what the driver hands back and a nullable
+	// column would let a NULL reach a Go bool — proving nothing about the shape
+	// the service actually meets.
+	//
+	// That annotation is here rather than as a `--` comment inside the statement
+	// below, and that is not style. SQLite stores the CREATE TABLE text verbatim
+	// in sqlite_master and re-parses it during ALTER TABLE ... DROP COLUMN,
+	// which truncates at the comment: the rollback tests that drop `category`
+	// and `landmark` then fail with `error in table events after drop column:
+	// incomplete input`. Measured — it is how this comment came to be out here.
 	schema := []string{
 		`CREATE TABLE events (
 			id INTEGER PRIMARY KEY,
@@ -166,7 +177,8 @@ func seedArtifact(path, lang string) error {
 			created_at datetime,
 			updated_at datetime,
 			url_path TEXT,
-			category TEXT
+			category TEXT,
+			landmark INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX idx_events_date ON events(date)`,
 		`CREATE UNIQUE INDEX idx_events_url_path ON events(url_path)`,
@@ -195,9 +207,9 @@ func seedArtifact(path, lang string) error {
 
 	for _, e := range fixtureRows(lang) {
 		if _, err := db.Exec(
-			`INSERT INTO events (id, date, title, description, media, tags, "references", created_at, updated_at, url_path, category)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			e.ID, e.Date, e.Title, e.Description, e.Media, e.Tags, e.References, e.CreatedAt, e.UpdatedAt, e.URLPath, e.Category,
+			`INSERT INTO events (id, date, title, description, media, tags, "references", created_at, updated_at, url_path, category, landmark)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			e.ID, e.Date, e.Title, e.Description, e.Media, e.Tags, e.References, e.CreatedAt, e.UpdatedAt, e.URLPath, e.Category, e.Landmark,
 		); err != nil {
 			return err
 		}
@@ -220,24 +232,47 @@ type fixtureRow struct {
 	Tags, URLPath        string
 	// Mandatory in canonical by validator invariant 13 — one value per row from
 	// a closed set — so every fixture row carries one. The set is owned by the
-	// data and grows (it gained `security` on 2026-08-10), so nothing here
-	// asserts its size; TestFixtureSchemaMatchesCanonical compares columns, not
-	// values, for exactly that reason.
+	// data and changes in both directions (it gained `security` on 2026-08-10
+	// and was rewritten from fifteen values to eight on 2026-08-12), so nothing
+	// here asserts its size; TestFixtureSchemaMatchesCanonical compares columns,
+	// not values, for exactly that reason.
 	//
-	// Every value below is a real member of that set except one, event 5's, and
-	// that exception is the whole point: see syntheticCategory.
+	// These values are deliberately NOT resynchronised with canonical's current
+	// eight. `mustread` and `bitcoin` below were real members until 2026-08-12
+	// and are not any more, which changes nothing these tests prove: the fixture
+	// is self-contained, the service holds no list to disagree with it, and the
+	// schema guard compares columns rather than values. Retargeting them would
+	// churn every assertion in category_test.go to prove the same properties.
+	// See syntheticCategory, whose argument this does slightly change.
 	Category string
+	// Landmark is canonical's `landmark`, added 2026-08-12: a boolean, orthogonal
+	// to Category, and NOT NULL DEFAULT 0 upstream so it has exactly one spelling
+	// for false.
+	//
+	// Event 2 must keep this true. It is the only row `q=bitcoin` matches in the
+	// RU fixture, so it is the only row through which /api/search can prove it
+	// fetched the column at all — see TestEventStructCoversEveryColumn, which a
+	// false cannot satisfy because false is also what an unfetched column
+	// marshals to.
+	Landmark bool
 }
 
 // syntheticCategory is deliberately NOT a member of canonical's vocabulary, and
 // it is the only assertion in this suite that can tell the boot-derived
 // vocabulary apart from a hardcoded list.
 //
-// Every other fixture category — holiday, mustread, archives, bitcoin — is a
-// real canonical value, so a compiled-in list would contain all of them and
-// accept all of them. Replacing loadCategories with such a list was measured
-// against this suite before this row existed: `go vet` clean, every test green.
-// The design the filter exists for was pinned by nothing.
+// When this row was written, every other fixture category — holiday, mustread,
+// archives, bitcoin — was a real canonical value, so a compiled-in list would
+// have contained all of them and accepted all of them. Replacing loadCategories
+// with such a list was measured against this suite before this row existed: `go
+// vet` clean, every test green. The design the filter exists for was pinned by
+// nothing.
+//
+// Canonical's 2026-08-12 rewrite left only holiday and archives from that set —
+// mustread and bitcoin are no longer members either. That weakens the sentence
+// above without weakening the row: this value was never a member and never will
+// be, whichever direction the vocabulary moves next, so it remains the one
+// assertion here that a hardcoded list cannot satisfy by accident.
 //
 // So one row carries a value no hardcoded list could ever hold. The filter
 // accepts it only if the vocabulary really was read out of the artifact at boot,
@@ -255,6 +290,11 @@ func strptr(s string) *string { return &s }
 // fixtureRows deliberately includes the awkward cases: a pre-epoch date, absent
 // media and references as NULL, absent timestamps, and an event that lists the
 // same tag twice.
+//
+// Landmark is true on events 1 and 2 and false on the rest — RU 2 of 5, EN 2 of
+// 4. Both states have to exist for ?landmark= to be provably a filter rather
+// than a pass-through, and the two languages differ so that a handler reading
+// the wrong artifact cannot go unnoticed.
 func fixtureRows(lang string) []fixtureRow {
 	rows := []fixtureRow{
 		{
@@ -273,6 +313,10 @@ func fixtureRows(lang string) []fixtureRow {
 			// fixture whose category always matched tags[0] would let the very
 			// inference canonical retired keep passing its tests.
 			Category: "holiday",
+			// One of two landmarks in this fixture. Two rather than one so that
+			// ?landmark=true returning the right set cannot be satisfied by a
+			// handler that happens to return a single row for another reason.
+			Landmark: true,
 		},
 		{
 			ID: 2, Date: "2008-11-01",
@@ -283,6 +327,12 @@ func fixtureRows(lang string) []fixtureRow {
 			CreatedAt:   strptr("2026-08-08 09:59:56"), UpdatedAt: strptr("2026-08-08 09:59:56"),
 			Tags: `["satoshi", "mustread"]`, URLPath: "/2008-11-01/bitcoin-whitepaper-published/",
 			Category: "mustread",
+			// Load-bearing, and not interchangeable with the other landmark: this
+			// is the only row `q=bitcoin` matches in either fixture, so it is the
+			// only one through which TestEventStructCoversEveryColumn can prove
+			// /api/search fetched the landmark column. Set this to false and that
+			// test goes green against a search handler that never selects it.
+			Landmark: true,
 		},
 		{
 			ID: 3, Date: "2013-08-09",
@@ -480,8 +530,14 @@ type event struct {
 	References  *string `json:"references"`
 	URLPath     string  `json:"url_path"`
 	Category    string  `json:"category"`
-	CreatedAt   *string `json:"created_at"`
-	UpdatedAt   *string `json:"updated_at"`
+	// Not a pointer, deliberately, mirroring the service: the contract says
+	// landmark is always a bool, never null. Decoding into a plain bool is also
+	// what would catch the service starting to emit null — encoding/json would
+	// leave it false and the assertions that expect true would fail, which is
+	// the direction that gets noticed.
+	Landmark  bool    `json:"landmark"`
+	CreatedAt *string `json:"created_at"`
+	UpdatedAt *string `json:"updated_at"`
 }
 
 type eventList struct {

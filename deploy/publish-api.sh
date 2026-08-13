@@ -600,6 +600,20 @@ for lang in sorted(set(b_dbs) & set(a_dbs)):
             f'         {b_cats} -> {a_cats}\n'
             f'         The artifact is byte-identical, so this binary reads it differently.')
 
+    # The landmark flag, on the same argument and with the same guard. The
+    # `is not None` half is doing real work on the release that introduces the
+    # field: `before` is the old binary, which does not report it, and `after`
+    # is the new one, which does. Comparing those two would fail the very deploy
+    # that adds the check, so absent on either side is not a fault — it is a
+    # binary older than the field on that side, i.e. the first deploy of one
+    # that has it, or a rollback past it.
+    b_lm, a_lm = b.get("landmark"), a.get("landmark")
+    if b_lm is not None and a_lm is not None and b_lm != a_lm:
+        problems.append(
+            f'{lang}: the landmark flag changed across a binary deploy —\n'
+            f'         {b_lm} -> {a_lm}\n'
+            f'         The artifact is byte-identical, so this binary reads it differently.')
+
 print("\n".join(notes))
 if problems:
     print("PROBLEMS", file=sys.stderr)

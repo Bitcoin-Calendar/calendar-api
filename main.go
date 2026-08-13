@@ -112,44 +112,53 @@ func badParam(c *fiber.Ctx, name, got, want string) error {
 	})
 }
 
-// categoryParamRejected refuses ?category= on an endpoint that does not filter
-// by it, and reports whether it answered the request — the same shape as
+// filterParamRejected refuses a filter parameter on an endpoint that does not
+// honour it, and reports whether it answered the request — the same shape as
 // pagination(), and for the same reason: c.JSON returns nil on success, so a
 // helper that returned its error would look like it had refused while the
 // handler carried on and overwrote the body under a 400 status line.
 //
-// Only /api/events honours the parameter. The two list endpoints this guards —
-// /api/search and /api/events/tags/:tag — accepted it and ignored it: a client
-// narrowing a search with &category=bitcoin got every match, with a 200 and
-// nothing anywhere in the response to say the filter had not been applied. That
-// is the same silence the 400 on an unknown category exists to break, arrived
-// at from the other side.
+// Only /api/events honours `category` and `landmark`. The two list endpoints
+// this guards — /api/search and /api/events/tags/:tag — accepted `category` and
+// ignored it: a client narrowing a search with &category=archives got every
+// match, with a 200 and nothing anywhere in the response to say the filter had
+// not been applied. That is the same silence the 400 on an unknown category
+// exists to break, arrived at from the other side. `landmark` was added to the
+// same guard in the same release that added the filter, so it never had a
+// window in which it was silently ignored here.
 //
-// /api/events/:id also ignores the parameter and is deliberately not guarded:
-// a fetch by id is not a list a filter could narrow, and the response carries
-// the event's actual category, so nothing about ignoring it is silent.
+// /api/events/:id also ignores both and is deliberately not guarded: a fetch by
+// id is not a list a filter could narrow, and the response carries the event's
+// actual category and landmark, so nothing about ignoring them is silent.
 //
 // This deliberately does not become a rule about unknown parameters in general.
-// A stray ?foo= carries no expectation that anything will happen; `category` is
-// a real parameter of this API with a documented meaning, so sending it *is* the
-// expectation. Rejecting it here is also the compatible direction: a later
-// release that implements the filter turns these 400s into 200s, while a client
-// written against today's silent pass-through would have to be corrected.
-func categoryParamRejected(c *fiber.Ctx) bool {
-	got := c.Query("category")
-	if got == "" {
-		return false
+// A stray ?foo= carries no expectation that anything will happen; these are real
+// parameters of this API with documented meanings, so sending one *is* the
+// expectation. Rejecting them here is also the compatible direction: a later
+// release that implements a filter turns these 400s into 200s, while a client
+// written against a silent pass-through would have to be corrected.
+//
+// The first parameter present wins. Answering for one is enough to tell the
+// caller the request was not honoured as sent, and enumerating the rest would
+// only make the message longer than the fix.
+func filterParamRejected(c *fiber.Ctx, names ...string) bool {
+	for _, name := range names {
+		got := c.Query(name)
+		if got == "" {
+			continue
+		}
+		zlog.Warn().Str("param", name).Str("got", got).Str("path", c.Path()).
+			Msg("rejected a query parameter this endpoint does not honour")
+		// The route pattern rather than c.Path(), so /api/events/tags/:tag names
+		// itself instead of echoing whichever tag the caller happened to ask for.
+		c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": fmt.Sprintf(
+				"%s is not a filter on %s, so it is refused rather than ignored. "+
+					"Only /api/events supports ?%s=", name, c.Route().Path, name),
+		})
+		return true
 	}
-	zlog.Warn().Str("param", "category").Str("got", got).Str("path", c.Path()).
-		Msg("rejected a query parameter this endpoint does not honour")
-	// The route pattern rather than c.Path(), so /api/events/tags/:tag names
-	// itself instead of echoing whichever tag the caller happened to ask for.
-	c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-		"error": fmt.Sprintf(
-			"category is not a filter on %s, so it is refused rather than ignored. "+
-				"Only /api/events supports ?category=", c.Route().Path),
-	})
-	return true
+	return false
 }
 
 // eventOrder is the sort every paginated list endpoint uses: newest first, with
@@ -483,9 +492,9 @@ func getEventsByTagHandler(c *fiber.Ctx) error {
 		})
 	}
 
-	// The tag filter does not compose with the category filter. See
-	// categoryParamRejected.
-	if categoryParamRejected(c) {
+	// The tag filter does not compose with the category or landmark filters.
+	// See filterParamRejected.
+	if filterParamRejected(c, "category", "landmark") {
 		return nil
 	}
 
@@ -615,6 +624,45 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 		query = query.Where("LOWER(TRIM(category)) = ?", want)
 	}
 
+	// landmark is the switch the website calls «Только главное»: one boolean,
+	// orthogonal to category, hiding everything that is not a landmark. It ANDs
+	// with category and with the date filters, so ?category=tech&landmark=true
+	// is "the tech events that matter".
+	//
+	// Presence is checked before the value is parsed, and that order is the
+	// point. Against an artifact predating the column — a rollback target —
+	// `WHERE landmark = ?` is `no such column: landmark`, measured, which would
+	// be a 500 for a question this service can answer perfectly well. It is also
+	// the more useful of the two rejections: "this artifact predates the column"
+	// tells the caller something "expected true or false" cannot.
+	//
+	// Unlike category there is no vocabulary to consult, so an unparseable value
+	// is the only other way to be wrong. It is a 400 rather than a quiet default
+	// for the reason the date filters are: ?landmark=yes silently read as false
+	// answers 200 with the 179 rows the caller least wanted, and nothing in the
+	// response says the filter was not the one asked for.
+	if landmarkStr := c.Query("landmark"); landmarkStr != "" {
+		// resolveLang, not the raw parameter, for the reason the category filter
+		// spells out: the artifact consulted must be the one this request reads.
+		flag := landmarkByLang[resolveLang(lang)]
+		if !flag.present {
+			return badParam(c, "landmark", landmarkStr, flag.expected())
+		}
+		// ParseBool rather than a hand-rolled comparison: it is the spelling a Go
+		// client would produce and a documented set (1/t/T/TRUE/true/True and the
+		// false equivalents), so callers who send "1" are not surprised. The
+		// rejection names `true or false` because that is the canonical form to
+		// reach for, not because the others are refused.
+		want, err := strconv.ParseBool(strings.TrimSpace(landmarkStr))
+		if err != nil {
+			return badParam(c, "landmark", landmarkStr, flag.expected())
+		}
+		// No LOWER/TRIM counterpart here: this column is INTEGER NOT NULL, so
+		// unlike category there is no stored casing or padding to defend
+		// against. Bound as a Go bool, which the driver binds as 1 or 0.
+		query = query.Where("landmark = ?", want)
+	}
+
 	// First, get the total count of records that match the filter
 	if err := query.Count(&totalEvents).Error; err != nil {
 		zlog.Error().Str("lang", lang).Err(err).Msg("getAllEventsHandler: Failed to count events")
@@ -654,8 +702,8 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Search query is required"})
 	}
 
-	// Search does not narrow by category. See categoryParamRejected.
-	if categoryParamRejected(c) {
+	// Search does not narrow by category or landmark. See filterParamRejected.
+	if filterParamRejected(c, "category", "landmark") {
 		return nil
 	}
 
@@ -702,22 +750,31 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		return queryFailed(c, err, "Failed to count search results")
 	}
 
-	// The one column in the list below that an artifact may genuinely not have.
-	// A release predating 2026-08-09 has no `category`, and those files are
-	// rollback targets — so naming it unconditionally makes every search on a
-	// rolled-back artifact answer 500, which is the outage the boot path was
-	// just taught not to cause. Every other handler adapts for free: GORM builds
-	// its SELECT from the struct against the table it can see, and only this
+	// The two columns in the list below that an artifact may genuinely not have.
+	// A release predating 2026-08-09 has no `category` and one predating
+	// 2026-08-12 has no `landmark`, and those files are rollback targets — so
+	// naming either unconditionally makes every search on a rolled-back artifact
+	// answer 500, which is the outage the boot path was taught not to cause.
+	// Every other handler adapts for free: GORM builds its SELECT from the
+	// struct against the table it can see and leaves the field at its zero value
+	// — measured against an artifact with both columns dropped — and only this
 	// statement enumerates by hand.
 	//
+	// They are independent rather than a single "old artifact" flag, because the
+	// two dates are two months' worth of releases apart and an artifact between
+	// them has one column and not the other.
+	//
 	// Spliced rather than parameterised because a column name is not a bind
-	// parameter. The value is one of two literals decided here, never anything a
+	// parameter. The value is built here from literals, never from anything a
 	// caller sent. Sprintf is safe on this statement specifically because it
 	// contains no other %% verb; anything added below that needs one must escape
 	// it or this stops being a formatting string.
-	categoryCol := " e.category,"
-	if !categoriesByLang[resolveLang(lang)].present {
-		categoryCol = ""
+	optionalCols := ""
+	if categoriesByLang[resolveLang(lang)].present {
+		optionalCols += " e.category,"
+	}
+	if landmarkByLang[resolveLang(lang)].present {
+		optionalCols += " e.landmark,"
 	}
 
 	searchSQL := fmt.Sprintf(`
@@ -731,7 +788,9 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		-- callers empty while /api/events returned them correctly.
 		-- TestEventStructCoversEveryColumn covers search specifically for that
 		-- reason, and checks the values rather than the keys, because a struct
-		-- field the SELECT never fetched still marshals to "" or null.
+		-- field the SELECT never fetched still marshals to "", null — or, since
+		-- landmark, to false, which is why that test had to learn that a false
+		-- proves nothing about whether the column was fetched.
 		--
 		-- fts.rank is deliberately not selected: nothing scans it — there is no
 		-- Rank field on Event — and SQLite orders by it perfectly well without
@@ -749,7 +808,7 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		-- event twice and never shown another.
 		ORDER BY fts.rank, e.id DESC
 		LIMIT ? OFFSET ?;
-	`, categoryCol)
+	`, optionalCols)
 	if err := db.Raw(searchSQL, query, limit, offset).Scan(&events).Error; err != nil {
 		if isFTSSyntaxError(err) {
 			return badSearchQuery(c, query, lang, err)
@@ -860,6 +919,40 @@ func main() {
 			continue
 		}
 		zlog.Info().Str("lang", lang).Int("categories", len(set.sorted)).Msg("Category vocabulary loaded")
+	}
+
+	// --- Landmark flag ---
+	// Separate from the loop above rather than folded into it: that one uses
+	// `continue` to skip its own logging, which would skip this too.
+	//
+	// An artifact predating the column is not fatal, for the same reason it is
+	// not fatal for category: it is a rollback target, and refusing to start
+	// against one turns a rollback into an outage. Only ?landmark= is affected —
+	// the field itself still renders, as false.
+	for lang, db := range map[string]*gorm.DB{"en": DB_EN, "ru": DB_RU} {
+		flag, err := loadLandmark(db)
+		if err != nil {
+			zlog.Fatal().Str("lang", lang).Err(err).Msg("Failed to read the landmark flag")
+		}
+		landmarkByLang[lang] = flag
+		if !flag.present {
+			zlog.Warn().Str("lang", lang).
+				Msg("This artifact has no landmark column: it predates 2026-08-12. " +
+					"?landmark= will be rejected and every event will report landmark false")
+			continue
+		}
+		// The column is there and no row carries the flag. Unlike an empty
+		// category vocabulary this breaks no upstream invariant — validate.py
+		// invariant 14 sets no target fraction — but it is still almost
+		// certainly a mistake, because it empties the one UI control the column
+		// exists to drive, and nothing upstream would say so.
+		if flag.count == 0 {
+			zlog.Warn().Str("lang", lang).
+				Msg("This artifact has a landmark column but no landmarks: no row carries the " +
+					"flag. ?landmark=true will answer an empty list")
+			continue
+		}
+		zlog.Info().Str("lang", lang).Int64("landmarks", flag.count).Msg("Landmark flag loaded")
 	}
 
 	// --- Health snapshot ---

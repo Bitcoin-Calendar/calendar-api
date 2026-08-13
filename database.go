@@ -54,7 +54,7 @@ func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 // Event matches the schema of the canonical database artifact:
 //
 //	events(id, date, title, description, media, tags, "references",
-//	       created_at, updated_at, url_path, category)
+//	       created_at, updated_at, url_path, category, landmark)
 //
 // The column order above is RU's. EN declares the same names in a different
 // order — media is fourth in RU and eighth in EN — so nothing here or in the
@@ -78,19 +78,45 @@ func (d DateString) Value() (driver.Value, error) { return string(d), nil }
 // closed set is enforced by validate.py invariant 13 and not by the DDL — the
 // column is declared TEXT with notnull=0 — so the data is clean because the
 // publisher checks it, not because the database would refuse otherwise.
-// Measured 2026-08-10 across both artifacts: 0 NULL, 0 empty, 0 values outside
+// Measured 2026-08-12 across both artifacts: 0 NULL, 0 empty, 0 values outside
 // the set, in 1,146 rows.
 //
 // Deliberately not an enum, and no list of permitted values anywhere in this
-// package: canonical owns the vocabulary and it grows. It shipped on 2026-08-09
-// with fourteen values and gained `security` the next day. A validating type
-// here would have to be rebuilt and redeployed to accept a value the data
-// already contains — so this field carries whatever the artifact holds, and
-// anything that genuinely needs the current set reads it from the artifact.
+// package: canonical owns the vocabulary and it *changes*. It shipped on
+// 2026-08-09 with fourteen values, gained `security` the next day, and on
+// 2026-08-12 was rewritten down to eight — `bitcoin` and `first` dissolved
+// entirely. A validating type here would have had to be rebuilt and redeployed
+// twice: once to accept a value the data already contained, and once to stop
+// accepting two it no longer does. So this field carries whatever the artifact
+// holds, and anything that genuinely needs the current set reads it from the
+// artifact.
 //
 // Consumers used to derive this from tags[0]. That inference is now wrong: tag
-// order carries no meaning, and `bitcoin` is a category value with no
-// corresponding tag left in the data at all.
+// order carries no meaning, and the two vocabularies do not correspond — `first`
+// is a tag on 104 RU rows and a category on none, having been a category on 53
+// of them until 2026-08-12.
+//
+// Landmark answers one question — is this event important to a bitcoiner — and
+// exists to drive one UI control, a switch that hides everything else. It is
+// orthogonal to Category: 402 of 581 RU rows and 394 of 565 EN rows carry it,
+// spread across every category.
+//
+// A plain bool, not a pointer, and that is the deliberate half. The column is
+// INTEGER NOT NULL DEFAULT 0 and validator invariant 14 pins it to exactly 0 or
+// 1, precisely so that "not a landmark" has one spelling — canonical chose the
+// constraint over a nullable column to avoid the defect step28 fixed for media
+// and references, where a NULL read as falsy in one consumer and as missing in
+// another. A *bool here would put that second spelling straight back into the
+// JSON, for a state no published artifact can hold.
+//
+// The one case a pointer would describe is an artifact predating the column, on
+// which every row renders `false` rather than "this artifact cannot say". That
+// is the same trade Category makes — it renders "" on those files — and it is
+// the right one, because the honest signal is delivered where a caller will
+// actually meet it: ?landmark= is refused with a 400 that says the artifact
+// predates the column, and /health reports landmark.present false for the
+// operator. A null in the payload would be a third channel that every client
+// has to branch on and none would.
 //
 // CreatedAt and UpdatedAt are pointers for the same reason as Media: they are
 // genuinely absent on many rows (505 of 582 RU created_at, 265 of 565 EN), and
@@ -108,8 +134,35 @@ type Event struct {
 	References  *string    `json:"references" gorm:"type:text"` // JSON array as string; NULL when absent
 	URLPath     string     `json:"url_path" gorm:"column:url_path"`
 	Category    string     `json:"category" gorm:"column:category"`
-	CreatedAt   *time.Time `json:"created_at"` // NULL on many rows; renders as null
-	UpdatedAt   *time.Time `json:"updated_at"` // NULL on many rows; renders as null
+	Landmark    bool       `json:"landmark" gorm:"column:landmark"` // INTEGER 0/1; false on an artifact predating the column
+	CreatedAt   *time.Time `json:"created_at"`                      // NULL on many rows; renders as null
+	UpdatedAt   *time.Time `json:"updated_at"`                      // NULL on many rows; renders as null
+}
+
+// hasColumn reports whether the events table in this artifact carries a column.
+//
+// Asked of the schema rather than inferred from a failed SELECT. Matching on
+// "no such column" would work today but puts a driver's error text on the boot
+// path, where a reworded message becomes a service that will not start;
+// pragma_table_info answers the question directly and is the same idiom the
+// test suite already uses to read an artifact's columns.
+//
+// It exists because two columns now need it. `category` arrived on 2026-08-09
+// and `landmark` on 2026-08-12, releases predating each are still on the box as
+// rollback targets, and the handlers that name either column by hand fail with
+// `no such column` against them — which is a 500 for a question this service
+// can otherwise answer perfectly well. See loadCategories and loadLandmark.
+//
+// The name is a bind parameter in a WHERE clause, not a spliced identifier, so
+// there is nothing here to quote.
+func hasColumn(db *gorm.DB, name string) (bool, error) {
+	var n int64
+	if err := db.Raw(
+		`SELECT count(*) FROM pragma_table_info('events') WHERE name = ?`, name,
+	).Scan(&n).Error; err != nil {
+		return false, fmt.Errorf("checking for the %s column: %w", name, err)
+	}
+	return n > 0, nil
 }
 
 // InitDB opens a database read-only. It performs no schema management of any

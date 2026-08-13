@@ -73,13 +73,22 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     the website's page URL. It is present on every row.
 *   **`category` is not `tags[0]`.** Every event has exactly one `category`, and it is what the
     website colours and filters by. Consumers used to derive it from the first tag; tag order
-    carries no meaning now and that inference is wrong. `bitcoin` is the sharp edge: it is a
-    category on 132 RU and 66 EN events and **no longer a tag on any**, so
-    `/api/events/tags/bitcoin` returns an empty list. Filter with `/api/events?category=…` and
-    discover the values with `/api/categories`. The set is closed but **owned by the data and
-    liable to grow** — `security` appeared a day after the column did — so accept unrecognised
-    values rather than hardcoding the list. The service derives the accepted values from the
-    artifact at startup for that reason; an unknown category is a `400`, not an empty list.
+    carries no meaning now and that inference is wrong. The tag and category vocabularies do
+    not correspond at all: `first` is a tag on ~104 rows and a category on none, and `bitcoin`
+    is now neither — so `/api/events/tags/bitcoin` returns an empty list and
+    `?category=bitcoin` is a `400`. Filter with `/api/events?category=…` and discover the
+    values with `/api/categories`. The set is closed but **owned by the data and liable to
+    change in both directions** — `security` appeared a day after the column did, and on
+    2026-08-12 the whole vocabulary was rewritten from fifteen values to eight — so accept
+    unrecognised values rather than hardcoding the list. The service derives the accepted
+    values from the artifact at startup for that reason; an unknown category is a `400`, not
+    an empty list.
+*   **`landmark` is a boolean, orthogonal to `category`.** It marks the events that matter to a
+    bitcoiner — 402 of 581 RU and 394 of 565 EN — and drives one UI control, the "Только
+    главное" switch. Filter with `/api/events?landmark=true`, which ANDs with `?category=` and
+    the date filters. Always `true` or `false`, never `null`. Added 2026-08-12: an artifact
+    published before then has no such column, and the service then reports `false` everywhere
+    and rejects `?landmark=` with a `400` rather than answering a misleading empty list.
     It is a filter on `/api/events` **only** — sending it to `/api/search` or
     `/api/events/tags/:tag` is a `400` too, rather than a `200` full of unfiltered results.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
@@ -120,7 +129,8 @@ These are the parts that are not guessable from the endpoint list. Each was a re
       "sha256": "12a5f040…",
       "rows": 581,
       "fts": { "indexed": 581, "consistent": true },
-      "categories": { "present": true, "count": 15 }
+      "categories": { "present": true, "count": 8 },
+      "landmark": { "present": true, "count": 402 }
     }
   }
 }
@@ -139,6 +149,12 @@ the artifact predates the column (`present: false`, which is what a rollback loo
 no row carries a value (`present: true`, which should never have been published).
 `publish-db.sh` refuses to leave a release in the second state. It does not affect `status`:
 a rollback target is not a degraded service.
+
+`landmark` reports the same two things for the flag, and `count` is exactly what
+`?landmark=true` returns. It differs from `categories` in what `count: 0` means: no row
+carrying the flag is legal data — the validator sets no target fraction for an editorial
+judgement — so `?landmark=true` answers an empty list and `publish-db.sh` warns rather than
+refusing. `present: false` is an artifact predating 2026-08-12.
 
 **The service refuses to start** if a full-text index is missing, empty or unreadable. That
 is deliberate: a broken index makes `/api/search` return an empty result set, which is

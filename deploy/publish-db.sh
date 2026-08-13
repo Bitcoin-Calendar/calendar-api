@@ -12,7 +12,8 @@
 #   remote validate   run validate.py against the STAGED copy, not just the source
 #   local  schema     the API's own test, against the staged copy — see below
 #   remote flip       symlink, then restart (mandatory — see below)
-#   remote verify     /health hashes, FTS coverage, categories, and a search assertion
+#   remote verify     /health hashes, FTS coverage, categories, landmarks, and a
+#                     search assertion
 #   remote prune      keep the last N releases
 #
 # What happens when something fails after the flip depends on what failed, and
@@ -103,11 +104,20 @@ DBS=(events_ru.db events_en.db)
 # Both numbers were re-measured against release 20260810T131954Z on 2026-08-10
 # and both had drifted. EN fell 450 -> 389 because the `bitcoin` tag was retired
 # in canonical: events_fts indexes the tags column, so removing the tag from
-# ~76% of rows removed those matches. `bitcoin` survives as a category value,
-# which the FTS index does not cover. RU fell 246 -> 244 with ordinary edits.
+# ~76% of rows removed those matches. RU fell 246 -> 244 with ordinary edits.
 # The previous release printed the warning below exactly as designed and the
 # constants were simply never updated — which is the failure mode this comment
 # exists to make harder.
+#
+# Re-measured again on 2026-08-13, against canonical after the step40 taxonomy
+# migration, and both are UNCHANGED: ru 244, en 389. That step rewrote `category`
+# on all 1,146 rows and added `landmark`, and touched neither title, description
+# nor tags — the only three columns events_fts indexes — so the counts could not
+# move. Confirmed by running both terms against dbs/superseded/*pre-step40* and
+# getting the same two numbers. Note that `bitcoin` is no longer a category at
+# all: step40 dissolved it, so it is now neither a tag nor a category, and an
+# earlier version of this comment offering it as the survivor of that 450 -> 389
+# drop is no longer true.
 VOCAB_RU_TERM="биткоин"
 VOCAB_EN_TERM="bitcoin"
 VOCAB_RU_LAST=244
@@ -628,7 +638,8 @@ fi
 # Asserts, in one pass: status is ok; both languages resolve to the release
 # just published (this is the check that catches a missed restart); the hashes
 # the process reports match the checksums that shipped with the artifact; every
-# row is indexed in both languages; and the category vocabulary is non-empty.
+# row is indexed in both languages; the category vocabulary is non-empty; and
+# the landmark flag is present.
 #
 # The category assertion is here because nothing else can make it. An artifact
 # whose `category` column carries nothing on any row has the right schema, so
@@ -712,6 +723,45 @@ for lang in ("en", "ru"):
             f"         should not exist. Every ?category= will be rejected until it is fixed.")
     else:
         notes.append(f'{lang}: {cats["count"]} categories')
+
+    # The same three states as categories, and the same reason for reporting
+    # them here: nothing else in this script can see any of them.
+    #
+    # The first case is the one only this can report. The schema guard runs the
+    # API's test from the LOCAL repo — it proves the staged artifact matches the
+    # checkout on this laptop, and says nothing about how old the binary on the
+    # box is — so publishing a landmark column against a binary that predates
+    # the field passes every other check green. That is not an incident: the
+    # column simply reaches no response until the binary catches up, and nothing
+    # consuming this API reads it yet. It is worth saying out loud anyway,
+    # because the symptom is a field that is quietly missing rather than one
+    # that is wrong, and those are the ones that go unnoticed.
+    #
+    # Where it departs from categories: an empty count is a WARNING, not a
+    # failure. validate.py invariant 14 pins every value to 0 or 1 and
+    # deliberately sets no target fraction — the flag is an editorial
+    # judgement — so an artifact with no landmarks is legal data in a way an
+    # artifact with no categories is not. It is still said out loud, because it
+    # empties the one UI control the column exists to drive.
+    lm = db.get("landmark")
+    if lm is None:
+        notes.append(f"!{lang}: /health carries no landmark flag; the running binary predates "
+                     f"the field, so this release is not checked for one. If this release is "
+                     f"the one adding `landmark`, run publish-api.sh to catch the binary up — "
+                     f"until then the column ships but reaches no response")
+    elif not lm.get("present"):
+        # No column at all: the artifact predates 2026-08-12. The schema guard
+        # should already have refused it, so reaching here means it was
+        # bypassed, and --allow-schema-drift is exactly that bypass.
+        msg = (f"{lang}: the published artifact has no `landmark` column, so ?landmark= is "
+               f"rejected for every value and every event reports landmark false")
+        (notes.append("!" + msg) if allow_schema_drift else problems.append(msg))
+    elif not lm.get("count"):
+        notes.append(f"!{lang}: the `landmark` column carries the flag on none of {db['rows']} "
+                     f"rows. That is legal — the validator sets no target fraction — but it "
+                     f"empties the switch the flag exists for. Check it was intended.")
+    else:
+        notes.append(f'{lang}: {lm["count"]} landmarks')
 
 print("\n".join(notes))
 if problems:

@@ -45,12 +45,22 @@ var categoriesByLang = map[string]categorySet{}
 //
 // The vocabulary is derived from the data rather than compiled in, and that is
 // the whole design decision here. `category` is a closed set, but canonical
-// owns it and it grows: the column shipped 2026-08-09 with fourteen values and
-// gained `security` the next day. A hardcoded list would have rejected
-// `security` with a 400 until a new binary was built *and* deployed — turning a
-// content edit into a code release. Reading it at boot means a new category
-// works the moment the artifact carrying it is published, which is the same
-// moment the rows using it appear.
+// owns it and it changes in both directions.
+//
+// It grows: the column shipped 2026-08-09 with fourteen values and gained
+// `security` the next day. A hardcoded list would have rejected `security` with
+// a 400 until a new binary was built *and* deployed — turning a content edit
+// into a code release.
+//
+// It also shrinks, which the growth case does not cover and which this handles
+// only because the set is *derived* rather than merged. On 2026-08-12 canonical
+// rewrote the vocabulary from fifteen values to eight, dissolving `bitcoin` and
+// `first` across every row. SELECT DISTINCT over live rows means a value that
+// leaves the data leaves `members` in the same release, so ?category=bitcoin
+// becomes a 400 naming the eight that replaced it — rather than a 200 with an
+// empty list, which is what a stale compiled-in list would have produced and is
+// exactly the silence this filter exists to break. Nothing survives a release
+// to contradict it: the process restarts, and there is no cache.
 //
 // The cost is one query per artifact at startup, no DDL, no writes.
 //
@@ -72,18 +82,11 @@ func loadCategories(db *gorm.DB) (categorySet, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), categoryProbeTimeout)
 	defer cancel()
 
-	// Asked of the schema rather than inferred from a failed SELECT. Matching
-	// on "no such column" would work today but puts a driver's error text on
-	// the boot path, where a reworded message becomes a service that will not
-	// start; pragma_table_info answers the question directly and is the same
-	// idiom the suite already uses to read an artifact's columns.
-	var hasColumn int64
-	if err := db.WithContext(ctx).Raw(
-		`SELECT count(*) FROM pragma_table_info('events') WHERE name = 'category'`,
-	).Scan(&hasColumn).Error; err != nil {
-		return categorySet{}, fmt.Errorf("checking for the category column: %w", err)
+	present, err := hasColumn(db.WithContext(ctx), "category")
+	if err != nil {
+		return categorySet{}, err
 	}
-	if hasColumn == 0 {
+	if !present {
 		return categorySet{}, nil
 	}
 

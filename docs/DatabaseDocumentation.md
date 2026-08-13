@@ -53,28 +53,38 @@ Present in both database files, with identical definitions.
 | `created_at`  | `datetime`    |               | Row bookkeeping. `NULL` on most rows. |
 | `updated_at`  | `datetime`    |               | Row bookkeeping. `NULL` on most rows. |
 | `url_path`    | `TEXT`        | `UNIQUE` index | `/<date>/<slug>/`. The website's page path and the cross-language join key. |
-| `category`    | `TEXT`        | none in the DDL | The event's single classification, from a closed set owned by canonical. Added 2026-08-09. **Mandatory by validator invariant 13, not by the schema** — the column is declared `notnull=0`, so the data is clean because the publisher checks it, not because SQLite would refuse otherwise. Measured 2026-08-10 across both artifacts: 0 `NULL`, 0 `''`, 0 values outside the set, 0 not lowercase/trimmed, in 1,146 rows. |
+| `category`    | `TEXT`        | none in the DDL | The event's single classification, from a closed set owned by canonical. Added 2026-08-09, vocabulary rewritten 2026-08-12. **Mandatory by validator invariant 13, not by the schema** — the column is declared `notnull=0`, so the data is clean because the publisher checks it, not because SQLite would refuse otherwise. Measured 2026-08-12 across both artifacts: 0 `NULL`, 0 `''`, 0 values outside the set, 0 not lowercase/trimmed, in 1,146 rows. |
+| `landmark`    | `INTEGER`     | `NOT NULL DEFAULT 0` | Boolean, orthogonal to `category`: is this event important to a bitcoiner. Added 2026-08-12. Constrained to exactly `0` or `1` by validator invariant 14 — SQLite would accept anything in an `INTEGER` column, and a `'true'` or a `NULL` would read as truthy in one consumer and falsy in another. `NOT NULL` is deliberate rather than incidental: it gives "not a landmark" exactly one spelling, which is the defect step28 fixed for `media`/`references`. 402 of 581 RU rows and 394 of 565 EN rows carry it. |
 
-**On `category`.** As of 2026-08-10 the values are `archives`, `bitcoin`, `first`, `holiday`,
-`legal`, `lightning`, `macro`, `mining`, `mustread`, `obituary`, `price`, `privacy`, `scam`,
-`security`, `software` — identical sets in both languages.
+**On `category`.** As of 2026-08-12 the values are `adoption`, `archives`, `fiat`, `freedom`,
+`holiday`, `obituary`, `reading`, `tech` — identical sets in both languages.
 
-**Do not treat that list, or its length, as fixed.** It has already changed twice: the column
-arrived on 2026-08-09 with fourteen values, and `security` was added on 2026-08-10, carved out
-of `bitcoin` (which fell 148→132 RU and 82→66 EN). Canonical owns this vocabulary. Anything
-here that needs the current set should read it from the artifact rather than carry a copy.
+**Do not treat that list, or its length, as fixed.** It has already changed three times, and
+the last change went *down*: the column arrived on 2026-08-09 with fourteen values, `security`
+was added on 2026-08-10, and on 2026-08-12 the whole vocabulary was rewritten from fifteen
+values to eight, dissolving `bitcoin` (132 RU / 66 EN rows) and `first` (53 RU / 69 EN) across
+the survivors. Canonical owns this vocabulary — it is authored in `categories.yaml`, generated
+into `categories.json`, and read from there by `validate.py`. Anything here that needs the
+current set should read it from the artifact rather than carry a copy.
+
 That is what the API does: `loadCategories` in `categories.go` runs one `SELECT DISTINCT` per
-artifact at startup, and `?category=` validates against the result. Had the list been compiled
-in, `security` would have been rejected as invalid until a new binary was built and deployed.
+artifact at startup, and `?category=` validates against the result. Because the set is
+*derived* rather than merged, it tracks both directions: had the list been compiled in,
+`security` would have been rejected until a new binary shipped, and `bitcoin` would have gone
+on being accepted — answering `200` with an empty list — long after the data stopped
+containing it.
 
 It replaces an older convention in which consumers read the classification out of `tags[0]`;
-tag order no longer carries meaning and that inference is now wrong. `bitcoin` is the clearest
-case — it exists as a category (132 RU, 66 EN) and **no longer exists as a tag at all**, so a
-hard-coded `tag=bitcoin` query returns zero rows.
+tag order no longer carries meaning and that inference is now wrong. The two vocabularies do
+not correspond: `first` is a tag on ~104 rows in each language and a category on none, having
+been a category on 53 RU rows until 2026-08-12, and `bitcoin` is now neither a tag nor a
+category — so a hard-coded `tag=bitcoin` query returns zero rows and `?category=bitcoin` is a
+`400`.
 
-The two languages disagree about the category of 62 of the 562 events they share by
-`url_path`. That is catalogued in canonical's README and is data, not a bug — but a
-two-language filter built on this column will return genuinely different sets.
+The languages used to disagree about the category of 62 of the 562 events they share by
+`url_path`. The 2026-08-12 migration closed that: RU is the reviewed language and EN takes the
+same value through `CROSSWALK-ru-en.tsv`, and all 565 paired rows now agree on **both**
+`category` and `landmark`. A two-language filter on either column returns matching sets.
 
 **The two languages declare these columns in different orders.** RU stores `media` fourth, EN
 eighth; the names and types match but the positions do not. Anything reading this schema must
