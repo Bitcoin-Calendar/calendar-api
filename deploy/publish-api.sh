@@ -417,8 +417,25 @@ ok "installed $REMOTE_API/$BINARY (root:root 0755)"
 # success path ends by printing them, and the "could not verify" path prints the
 # same two — one wording, so the instructions cannot drift apart.
 manual_commands() {
-	printf '    roll back by hand: ssh %s \"cp -p %s %s/%s && systemctl restart %s\"\n' \
-		"$SSH_HOST" "$BACKUP" "$REMOTE_API" "$BINARY" "$SERVICE"
+	# Print a quoted heredoc so the operator's shell cannot expand remote
+	# variables. Bash %q preserves paths at the receiving bash -se boundary.
+	printf '    roll back by hand:\n    ssh %q '\''bash -se'\'' <<'\''BITCAL_ROLLBACK'\''\n' "$SSH_HOST"
+	printf 'backup=%q\ntarget=%q\nservice=%q\nhealth_url=%q\nexpected_version=%q\n' \
+		"$BACKUP" "$REMOTE_API/$BINARY" "$SERVICE" "$HEALTH_URL" "$BEFORE_VERSION"
+	# These variables must expand only when the printed recipe runs remotely.
+	# shellcheck disable=SC2016
+	printf '%s\n' \
+		'set -euo pipefail' \
+		'rollback_tmp=$(mktemp "${target}.rollback.XXXXXX")' \
+		'trap '\''rm -f -- "$rollback_tmp"'\'' EXIT' \
+		'cp -p -- "$backup" "$rollback_tmp"' \
+		'chown root:root "$rollback_tmp"' \
+		'chmod 0755 "$rollback_tmp"' \
+		'mv -f -- "$rollback_tmp" "$target"' \
+		'systemctl restart "$service"' \
+		'health=$(curl -fsS --retry 10 --retry-connrefused --retry-delay 1 --max-time 3 "$health_url")' \
+		'printf "%s\n" "$health" | jq -e --arg version "$expected_version" '\''.status == "ok" and .version == $version'\''' \
+		'BITCAL_ROLLBACK'
 	printf '    verify by hand:    ssh %s \"curl -s %s | jq .\"\n' "$SSH_HOST" "$HEALTH_URL"
 }
 
