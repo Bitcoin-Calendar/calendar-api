@@ -10,10 +10,9 @@ authored and validated in a separate repository and shipped here whole; this ser
 them with `mode=ro`, never migrates them, and never creates the indexes, triggers or
 full-text tables they already carry. On the server the files are mode `0444` in a `0555`
 directory, and systemd's `ReadOnlyPaths` makes the kernel refuse a write even if a future
-code change tried one.
-
-That arrangement exists because the project previously had eighteen divergent copies of the
-same database and no way to tell which one any given consumer was reading.
+code change tried one. That arrangement exists because the project previously had eighteen
+divergent copies of the same database and no way to tell which one any given consumer was
+reading.
 
 ## Quick start
 
@@ -41,11 +40,12 @@ Two things about the build are not optional:
 
 ## Endpoints
 
-Everything under `/api` requires an `X-API-KEY` header. `/health` does not.
+Everything under `/api` requires an `X-API-KEY` header. `/health` and `/public/v1/events` do not.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Which artifact this process has open, and whether it is fully indexed. Unauthenticated. |
+| `GET /public/v1/events` | Every event for one language as a single document, for the website. Unauthenticated, unpaginated, with a strong `ETag`. |
 | `GET /api/events` | Events, paginated. Filter with `year`, `month`, `day`, `category`, `landmark`. |
 | `GET /api/events/:id` | One event. |
 | `GET /api/events/tags/:tag` | Events carrying a tag. |
@@ -55,6 +55,38 @@ Everything under `/api` requires an `X-API-KEY` header. `/health` does not.
 
 All of them take `lang=en` (default) or `lang=ru`. Full detail, including every field and
 every error, is in [docs/APIDocumentation.md](docs/APIDocumentation.md).
+
+### The public document
+
+`/public/v1/events` is the one read that needs no key, because its consumer is a public
+client the service cannot hand a secret to: the static website (`gm-web`) fetches it once
+from Node at build time, and anyone else may read it the same way. It is not a browser
+fetch, so no CORS origin needs to be added for it. It differs from `/api/events` on purpose:
+
+*   **The whole artifact in one body**, in the same order as `/api/events` (date DESC, id DESC).
+    No pagination.
+*   **A smaller event**: `id`, `date`, `title`, `description`, `references`, `media`.
+*   **`references` and `media` are real arrays of strings**, `[]` when absent — never `null`,
+    never a JSON-encoded string. A malformed stored value is normalised to the strings it
+    holds rather than dropping the event, and the top-level `invalid_reference_fields` /
+    `invalid_media_fields` counters say how many fields that happened to. Strings are
+    preserved as stored; deciding what is a URL is the consumer's job.
+*   **`schema` is `bitcoin-calendar.public-events.v1`**, and `database.sha256` / `database.rows`
+    are the same values `/health` reports for that language.
+*   **Strong `ETag`** per service build, language and artifact; `If-None-Match` answers `304`.
+    It changes when a new artifact is published or a new build of this service is deployed,
+    since either can change the bytes.
+
+`lang` behaves as everywhere else — `en` by default, unknown values fall back to `en` — and
+the `language` field names the artifact actually served. This route and `/health` are
+rate-limited by connecting IP, whatever `X-API-KEY` a caller sends: only under `/api` does
+the key choose the bucket, because only there is it checked. Direct callers using the same
+loopback address share one bucket; nginx-proxied callers **all** collapse into nginx's loopback bucket, because the app
+sees nginx's address for every one of them — and that bucket overlaps the operator's direct
+`/health` calls whenever they arrive from the same address. A public rollout therefore puts a cache in front of
+this route (revalidating on the `ETag`) and owns the external per-client and aggregate
+limits; the app limiter is not that protection. Exceeding the app limit is a `429`, and a
+genuine server fault a `500`, as everywhere else.
 
 ## Things that will bite a client
 
@@ -73,17 +105,15 @@ These are the parts that are not guessable from the endpoint list. Each was a re
 *   **`url_path`** (`/2013-08-09/hal-finneys-last-post/`) is the cross-language join key and
     the website's page URL. It is present on every row.
 *   **`category` is not `tags[0]`.** Every event has exactly one `category`, and it is what the
-    website colours and filters by. Consumers used to derive it from the first tag; tag order
-    carries no meaning now and that inference is wrong. The tag and category vocabularies do
-    not correspond at all: `first` is a tag on ~104 rows and a category on none, and `bitcoin`
-    is now neither — so `/api/events/tags/bitcoin` returns an empty list and
-    `?category=bitcoin` is a `400`. Filter with `/api/events?category=…` and discover the
-    values with `/api/categories`. The set is closed but **owned by the data and liable to
-    change in both directions** — `security` appeared a day after the column did, and on
-    2026-08-12 the whole vocabulary was rewritten from fifteen values to eight — so accept
-    unrecognised values rather than hardcoding the list. The service derives the accepted
-    values from the artifact at startup for that reason; an unknown category is a `400`, not
-    an empty list.
+    website colours and filters by. Tag order carries no meaning, so deriving it from the
+    first tag is wrong. The tag and category vocabularies do not correspond at all: `first` is
+    a tag on ~104 rows and a category on none, and `bitcoin` is neither — so
+    `/api/events/tags/bitcoin` returns an empty list and `?category=bitcoin` is a `400`.
+    Filter with `/api/events?category=…` and discover the values with `/api/categories`. The
+    set is closed but **owned by the data and liable to change in both directions** — it was
+    rewritten wholesale on 2026-08-12 — so accept unrecognised values rather than hardcoding
+    the list. The service derives the accepted values from the artifact at startup for that
+    reason; an unknown category is a `400`, not an empty list.
 *   **`landmark` is a boolean, orthogonal to `category`.** It marks the events that matter to a
     bitcoiner — 402 of 581 RU and 394 of 565 EN — and drives one UI control, the "Только
     главное" switch. Filter with `/api/events?landmark=true`, which ANDs with `?category=` and
@@ -97,25 +127,23 @@ These are the parts that are not guessable from the endpoint list. Each was a re
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on
     a typo being caught.
 *   **`/api/tags` returns its list under `data`**, not `tags`.
-*   **A malformed `month`, `day` or `year` is a 400**, deliberately. An unparseable filter
-    used to return an empty list, which is indistinguishable from a day that has no events —
-    a client would post nothing and report success forever.
+*   **A malformed `month`, `day` or `year` is a 400**, deliberately. An empty list is
+    indistinguishable from a day that has no events, so a client with a bug in its date
+    arithmetic would post nothing and report success forever.
 *   **A malformed search query is a 400**, not a 500. Bare `AND`/`OR`/`NOT`, unbalanced
     parentheses or quotes, and a leading `*` are all invalid FTS5. Prefix search
     (`биткоин*`) and `OR`/`NEAR` do work.
 *   **Quoting `q` is a phrase search.** `q="bitcoin price"` wants those words adjacent, in
     that order — 6 hits against the English artifact. Unquoted, `q=bitcoin price` is an
-    implicit `AND` and finds 39. Before 2026-08-09 the two were the same: the handler doubled
-    every `"` on its way to FTS5, so quotes were silently discarded and a stray `"` answered
-    200 rather than 400.
+    implicit `AND` and finds 39.
 *   **`limit` is capped at 1000 and `page` at 1000000**, and both are a 400 when out of range
-    or unparseable rather than being clamped. `limit=abc` used to be page 1 of 20 with a 200.
-    The ceiling sits above the corpus on purpose — `limit=1000` returns every event for a
-    language — so it refuses only values that cannot be meant seriously.
+    or unparseable rather than being clamped. The ceiling sits above the corpus on purpose —
+    `limit=1000` returns every event for a language — so it refuses only values that cannot
+    be meant seriously.
 *   **Lists are newest first, ties broken by `id` descending.** 19 dates carry more than one
     event in English, and without the tiebreaker paging across one could show an event twice
     and skip another.
-*   **Rate limiting is 100/min per API key.** Give each consumer its own key: they all reach
+*   **Rate limiting under `/api` is 100/min per API key.** Give each consumer its own key: they all reach
     the service over loopback, so anything keyed per-IP would be one shared budget.
 
 ## Health
@@ -123,11 +151,11 @@ These are the parts that are not guessable from the endpoint list. Each was a re
 ```json
 {
   "status": "ok",
-  "version": "0.1.0-dd9c9dd",
+  "version": "0.1.0-82cafb9",
   "databases": {
     "ru": {
-      "path": "/srv/bitcal/data/releases/20260810T191227Z/events_ru.db",
-      "sha256": "12a5f040…",
+      "path": "/srv/bitcal/data/releases/20260813T054356Z/events_ru.db",
+      "sha256": "5bdc8c3e…",
       "rows": 581,
       "fts": { "indexed": 581, "consistent": true },
       "categories": { "present": true, "count": 8 },
@@ -142,20 +170,20 @@ inode the process actually has open rather than whatever `current` points at whe
 Those two differing is the failure the endpoint exists to catch.
 
 `fts.consistent` is `indexed == rows`: every event is reachable by search. When it is false,
-`status` becomes `degraded` — the service is up and search is silently incomplete.
+`status` becomes `degraded` — the service is up and search is silently incomplete. `status`
+reports full-text coverage only; the two blocks below never affect it, because serving an
+artifact that predates a column is what a rollback looks like.
 
 `categories` is what the service read out of the artifact at startup, and it is what
 `?category=` validates against. `count: 0` means every category filter is rejected — either
-the artifact predates the column (`present: false`, which is what a rollback looks like) or
-no row carries a value (`present: true`, which should never have been published).
-`publish-db.sh` refuses to leave a release in the second state. It does not affect `status`:
-a rollback target is not a degraded service.
+the artifact predates the column (`present: false`) or no row carries a value (`present:
+true`, which should never have been published; `publish-db.sh` refuses to leave a release in
+that state).
 
 `landmark` reports the same two things for the flag, and `count` is exactly what
-`?landmark=true` returns. It differs from `categories` in what `count: 0` means: no row
-carrying the flag is legal data — the validator sets no target fraction for an editorial
-judgement — so `?landmark=true` answers an empty list and `publish-db.sh` warns rather than
-refusing. `present: false` is an artifact predating 2026-08-12.
+`?landmark=true` returns. It differs in what `count: 0` means: no row carrying the flag is
+legal data — the validator sets no target fraction for an editorial judgement — so
+`?landmark=true` answers an empty list and `publish-db.sh` warns rather than refusing.
 
 **The service refuses to start** if a full-text index is missing, empty or unreadable. That
 is deliberate: a broken index makes `/api/search` return an empty result set, which is
