@@ -448,8 +448,19 @@ func main() {
 		// in a data structure that a future dump, metric or log line might
 		// expose. Unauthenticated requests fall back to the IP, which is what
 		// /health uses.
+		//
+		// The key only selects a bucket under /api, where authMiddleware turns
+		// a key that is not one of ours into a cheap 401. Outside /api nothing
+		// checks it, so honouring it there would hand every caller a fresh
+		// 100/min budget per invented header value — on /public/v1/events, the
+		// one keyless route that reads the whole corpus. /health and the public
+		// route are therefore keyed on the IP whatever X-API-KEY says. The path
+		// is lowercased because Fiber routes case-insensitively: /API/events is
+		// served by the /api group and must be budgeted as it is.
 		KeyGenerator: func(c *fiber.Ctx) string {
-			if k := c.Get("X-API-KEY"); k != "" {
+			path := strings.ToLower(c.Path())
+			isAPI := path == "/api" || strings.HasPrefix(path, "/api/")
+			if k := c.Get("X-API-KEY"); k != "" && isAPI {
 				sum := sha256.Sum256([]byte(k))
 				return "key:" + hex.EncodeToString(sum[:8])
 			}
@@ -472,6 +483,13 @@ func main() {
 	// Unauthenticated, and outside the /api group on purpose: this is the
 	// check the publisher runs after every release.
 	app.Get("/health", healthHandler)
+
+	// The public read, and the only other route outside /api: gm-web fetches
+	// it from Node at build time (not from a browser) and, being a public
+	// client, cannot be handed a key. It reads the database, so it carries the
+	// same deadline as everything under /api.
+	// Fiber also registers HEAD; the existing CORS middleware handles preflight.
+	app.Get(publicEventsPath, timeout.NewWithContext(publicEventsHandler, queryTimeout))
 
 	// Setup routes
 	api := app.Group("/api", authMiddleware)

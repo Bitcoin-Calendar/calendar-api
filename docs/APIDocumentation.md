@@ -25,19 +25,30 @@ all of these and they have been removed. `Access-Control-Allow-Methods` is `GET,
 
 The API requires an API key to be passed in the `X-API-KEY` header for all endpoints under `/api`. The server can be configured with one or more comma-separated keys via the `API_KEYS` environment variable.
 
+Two routes sit outside `/api` and need no key: `/health` and `/public/v1/events` (section 8).
+
 ### CORS
 
-Browser-based clients must comply with Cross-Origin Resource Sharing (CORS) rules. The server automatically adds the appropriate `Access-Control-*` headers when the request's `Origin` value is included in `CORS_ALLOWED_ORIGINS` (comma-separated list, defaults to `http://localhost:3000`).  Pre-flight `OPTIONS` requests are handled transparently and receive a `204 No Content` response.  Non-browser tools (curl, bots) that do not send the `Origin` header remain unaffected.
+Browser-based clients must comply with Cross-Origin Resource Sharing (CORS) rules. The server automatically adds the appropriate `Access-Control-*` headers when the request's `Origin` value is included in `CORS_ALLOWED_ORIGINS` (comma-separated list, defaults to `http://localhost:3000`).  Pre-flight `OPTIONS` requests are handled transparently and receive a `204 No Content` response.  Non-browser tools (curl, bots) that do not send the `Origin` header remain unaffected. That includes the website's own read of `/public/v1/events`, which happens in Node at build time, so exposing that route publicly requires no addition to `CORS_ALLOWED_ORIGINS`.
 
 ## Rate Limiting
 
-**100 requests per minute, per API key.** Each caller should therefore have its own key —
-ask for one rather than sharing.
+**100 requests per minute, per API key under `/api`** (per connecting IP on `/health` and
+`/public/v1/events`). Each caller should therefore have its own key — ask for one rather
+than sharing.
 
 It is keyed on the API key rather than the client address deliberately: every consumer of
 this service runs on the same host and reaches it over loopback, so a per-IP limit would put
 all of them in one shared bucket, where they would throttle each other with intermittent
-`429`s as the only symptom. Requests with no API key (`/health`) fall back to per-IP.
+`429`s as the only symptom. Only requests under `/api` are budgeted by key, because only
+there is the key checked; `/health` and `/public/v1/events` are budgeted by connecting IP
+whatever `X-API-KEY` they carry, so inventing a header value does not buy a fresh budget.
+Requests under `/api` with no key also fall back to the IP. Note what that means once nginx
+is in front: every proxied request to `/health` or `/public/v1/events` arrives from nginx's
+loopback address, so all of those callers share one bucket — with
+each other and with the operator's direct `/health` calls. External per-client limiting,
+aggregate protection and caching for the public route belong to the rollout layer, not to
+this limiter.
 
 The response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`.
 
@@ -62,6 +73,7 @@ The API provides the following main functionalities:
 *   **`/categories`**: Get every category and its event count — what a client needs to build a category filter.
 *   **`/events/tags/:tag`**: Retrieve a paginated list of events associated with a specific tag.
 *   **`/health`**: Report which database artifact the service has open. **Not** under `/api`, and needs no API key.
+*   **`/public/v1/events`**: Every event for one language as a single document, shaped for the website. **Not** under `/api`, and needs no API key.
 
 Detailed information for each endpoint is provided below.
 
@@ -82,7 +94,7 @@ client, because they have changed:
 | `media` | string \| null | A JSON array encoded as a string, or `null` when the event has no media. Never `""` and never `"[]"` — absence is exactly one value. |
 | `references` | string \| null | Same encoding and same null rule as `media`. |
 | `url_path` | string | `/<date>/<slug>/`, e.g. `"/2013-08-09/hal-finneys-last-post/"`. The site's page path and the cross-language join key. **Note the leading slash** — joining it onto a base URL with another `/` yields a double slash. |
-| `category` | string | The event's single classification. Always present, never empty, always one of a closed set — but **the set is owned by the data, not by this API, and it changes in both directions**. It gained `security` on 2026-08-10, and on 2026-08-12 it was rewritten from fifteen values down to eight. Treat an unrecognised value as valid and render it; do not hardcode the list into a client. As of 2026-08-12 it is: `adoption`, `archives`, `fiat`, `freedom`, `holiday`, `obituary`, `reading`, `tech`. **Do not derive it from `tags[0]`** — that inference used to work and is now wrong, because tag order carries no meaning. Note that the tag and category vocabularies do not correspond: `first` is a tag on ~104 rows and a category on none (it was a category until 2026-08-12), and `bitcoin` is now neither. |
+| `category` | string | The event's single classification. Always present, never empty, always one of a closed set — but **the set is owned by the data, not by this API, and it changes in both directions**. It was rewritten wholesale on 2026-08-12, from fifteen values down to eight. Treat an unrecognised value as valid and render it; do not hardcode the list into a client. As of 2026-08-12 it is: `adoption`, `archives`, `fiat`, `freedom`, `holiday`, `obituary`, `reading`, `tech`. **Do not derive it from `tags[0]`** — that inference used to work and is now wrong, because tag order carries no meaning. Note that the tag and category vocabularies do not correspond: `first` is a tag on ~104 rows and a category on none (it was a category until 2026-08-12), and `bitcoin` is now neither. |
 | `landmark` | boolean | Whether this event is one of the events that matter to a bitcoiner — the flag behind the site's "Только главное" switch. Always present, always `true` or `false`, **never `null`**. It is orthogonal to `category`: 402 of 581 RU and 394 of 565 EN events carry it, spread across every category. Added 2026-08-12; against a database artifact published before then the service reports `false` for every event, and `/health` says `landmark.present: false`. |
 | `created_at` | string \| null | RFC 3339, or `null`. Bookkeeping about the row, not about the event; most rows have no value. |
 | `updated_at` | string \| null | Same. |
@@ -108,7 +120,7 @@ client, because they have changed:
 
 **`GET /api/tags` is the authoritative list.** It returns every tag in the requested language
 with its usage count, straight from the artifact, so it is correct by construction. Prefer it
-to anything written here: as of 2026-08-10 there are **192 distinct tags in each language**,
+to anything written here: as of 2026-08-13 there are **192 distinct tags in each language**,
 and the selection below is an orientation aid, not a catalogue.
 
 Tag matching on `/events/tags/:tag` is case-insensitive.
@@ -129,7 +141,7 @@ Tag matching on `/events/tags/:tag` is case-insensitive.
 > `/api/events/tags/bitcoin` returns an empty list and `?category=bitcoin` is a `400`. See the
 > `category` field above.
 
-The most-used tags, by event count as of 2026-08-10 (English; Russian is within a row or two):
+The most-used tags, by event count as of 2026-08-13 (English; Russian is within a row or two):
 
 *   `cypherpunks` (118): the cypherpunk movement and its figures — Satoshi Nakamoto, Hal Finney, David Chaum and other early adopters.
 *   `first` (103): milestone events marking a first occurrence in the Bitcoin ecosystem.
@@ -222,9 +234,10 @@ client could not tell its own typo from a quiet corner of the corpus. Matching i
 case-insensitive.
 
 The accepted set is **read from the artifact when the service starts**, not compiled into the
-binary. That is deliberate: canonical owns this vocabulary and it grows — `security` was added
-on 2026-08-10 — and a hardcoded list would reject a valid new category until a new binary was
-built *and* deployed, turning a content edit into a code release. Call `/api/categories` for
+binary. That is deliberate: canonical owns this vocabulary and it changes in both directions —
+it was rewritten from fifteen values to eight on 2026-08-12 — and a hardcoded list would reject
+a valid new category until a new binary was built *and* deployed, turning a content edit into a
+code release. It would also go on accepting one that had been removed. Call `/api/categories` for
 the current set.
 
 If the artifact being served has no categories at all — it predates the column, or no row
@@ -579,19 +592,19 @@ Error responses will typically be in JSON format, like:
     ```json
     {
       "status": "ok",
-      "version": "0.1.0-abc1234",
+      "version": "0.1.0-82cafb9",
       "databases": {
         "en": {
-          "path": "/srv/bitcal/data/releases/20260810T191227Z/events_en.db",
-          "sha256": "6abda1c576b81220538b35d2d697064ac5a0ea72ecc6772d9c58832cdcf8f80e",
+          "path": "/srv/bitcal/data/releases/20260813T054356Z/events_en.db",
+          "sha256": "dc76aa78af1c16125d2d0793ee59191e330f65ef50f96d835ec7632b7d16d7ef",
           "rows": 565,
           "fts": { "indexed": 565, "consistent": true },
           "categories": { "present": true, "count": 8 },
           "landmark": { "present": true, "count": 394 }
         },
         "ru": {
-          "path": "/srv/bitcal/data/releases/20260810T191227Z/events_ru.db",
-          "sha256": "12a5f04093e31ceb0a34cf44b60f4d5758869c96e990bb5b840ac3f983b45ba4",
+          "path": "/srv/bitcal/data/releases/20260813T054356Z/events_ru.db",
+          "sha256": "5bdc8c3e68f34dd172a189dd5c792720a05433e97e5d78251a069bb16b3b06bb",
           "rows": 581,
           "fts": { "indexed": 581, "consistent": true },
           "categories": { "present": true, "count": 8 },
@@ -657,4 +670,126 @@ See *Startup checks* in [Deployment](Deployment.md).
       .status == "ok" and (.databases | to_entries | all(.value.fts.consistent))'
     ```
 
-[![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn) 
+### 8. Public events
+
+*   **Endpoint:** `/public/v1/events` — at the root, **not** under `/api`
+*   **Methods:** `GET` and `HEAD` (the same headers, with no response body).
+    CORS preflight `OPTIONS` requests with `Origin` and
+    `Access-Control-Request-Method` headers receive `204` from the existing
+    middleware; allowed origins are unchanged. Other methods, including ordinary
+    non-preflight `OPTIONS`, receive `405`.
+*   **Authentication:** none
+*   **Description:** Every event in one language's artifact as a single document, shaped for a
+    page to render without a second decode. This is the website's read — the static
+    `gm-web` build fetches it once from Node at build time; it is not a browser fetch, so no
+    CORS origin needs to be added for it (`CORS_ALLOWED_ORIGINS` is unchanged), and any
+    other public client may read it the same way. It is served by the same process, from
+    the same open database handles, as `/api`, and it carries the same 5 second query
+    deadline. Nothing under `/api` changes because of it.
+
+    It is deliberately not `/api/events` without the key. The event object is smaller, the
+    two optional lists are real arrays, the body is the whole artifact rather than a page of
+    it, and the document names the schema it conforms to and the artifact it was read from.
+    Anything that changes this shape is a `v2` at a new path.
+
+*   **Query Parameters:**
+    *   `lang` (optional, string): `en` (default) or `ru`, resolved exactly as everywhere else —
+        case-insensitive, and an unknown value falls back to `en` without an error. The
+        `language` field in the response names the artifact actually served, so a caller that
+        sent `lang=xx` sees `"language": "en"`.
+*   **Request Headers:**
+    *   `If-None-Match` (optional): the `ETag` from a previous response. If it names the current
+        document the answer is `304 Not Modified` with the `ETag` and no body.
+        Comparison is weak: `W/"tag"` also matches `"tag"`. A comma-separated
+        list matches if any tag matches; `*` matches the current document.
+*   **Success Response (200 OK):**
+    *   **Content-Type:** `application/json`
+    *   **Headers:** `ETag`, strong and quoted. It is derived from the schema name, the service
+        build's `version` (as `/health` reports it), the resolved language and the artifact's
+        `sha256`, so it is the same for every request against the same build and artifact,
+        differs between `en` and `ru`, and changes when either a new artifact is published or a
+        new build of this service is deployed — the only times the document can change.
+    *   **Body:**
+        ```json
+        {
+          "schema": "bitcoin-calendar.public-events.v1",
+          "language": "ru",
+          "database": {
+            "sha256": "5bdc8c3e68f34dd172a189dd5c792720a05433e97e5d78251a069bb16b3b06bb",
+            "rows": 581
+          },
+          "invalid_reference_fields": 0,
+          "invalid_media_fields": 0,
+          "events": [
+            {
+              "id": 267,
+              "date": "2013-08-09",
+              "title": "✍️ Последний пост Хэла Финни",
+              "description": "9 августа 2013 года Хэл Финни опубликовал свой последний пост на bitcointalk.",
+              "references": ["https://web.archive.org/web/20240207194838/https://bitcointalk.org/..."],
+              "media": ["https://i.nostr.build/dwoR3.png"]
+            }
+            // ... every event, newest first
+          ]
+        }
+        ```
+
+#### Fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema` | string | Always `bitcoin-calendar.public-events.v1`. Dispatch on it. |
+| `language` | string | `en` or `ru`: the artifact the body was read from, not the parameter as sent. |
+| `database.sha256` | string | The artifact's hash, identical to `databases.<language>.sha256` on `/health`. |
+| `database.rows` | integer | Rows in the artifact, identical to `databases.<language>.rows` on `/health`, and equal to the length of `events`. |
+| `invalid_reference_fields` | integer | How many events' `references` could not be taken as stored. See *Normalisation*. `0` on any artifact the publisher accepted. |
+| `invalid_media_fields` | integer | The same, for `media`. |
+| `events` | array | Every event, `date` descending with `id` descending breaking ties — the same order as `/api/events`. Never `null`. |
+| `events[].id` | integer | The same id `/api/events/:id` uses. Independent per language, as always. |
+| `events[].date` | string | `YYYY-MM-DD`, as on `/api`. |
+| `events[].title`, `events[].description` | string | As stored. |
+| `events[].references`, `events[].media` | array of strings | **Always an array.** `[]` when the artifact holds `NULL` — never `null`, and never the JSON-encoded string `/api` emits. Strings are passed through exactly as stored, including any that are not URLs; deciding what to link is the consumer's job, made against the data it can see. |
+
+#### Normalisation
+
+`references` and `media` are promised as arrays of strings on every event, and the promise
+does not depend on the artifact being clean. If a stored value is not valid JSON, is valid
+JSON but not an array, or is an array containing entries that are not strings, the event is
+still served with its core fields intact: the field becomes the string entries it held, in
+their stored order (`[]` if there were none), and the corresponding top-level counter goes up
+by one for that field. SQL `NULL` is not counted — it is the documented spelling of
+"nothing". Stored JSON text `null` is not an array and is counted; `[]` is a valid array
+and is not counted.
+
+The publisher validates both columns before a release, so the counters should read `0`. A
+non-zero value is worth reporting: something was served incompletely, and this is the only
+place that says so.
+
+*   **Error Responses:**
+    *   `304 Not Modified`: `If-None-Match` named the current document. `ETag` is set, the body is empty.
+    *   `405 Method Not Allowed`: unsupported methods; `GET`, `HEAD`, and CORS preflight
+        `OPTIONS` are handled as described above.
+    *   `408 Request Timeout`: the query exceeded its 5 second deadline. See Timeouts above.
+    *   `429 Too Many Requests`: the per-IP bucket is exhausted; `X-API-KEY` does not change
+        which bucket this route uses. See Rate Limiting above for why, behind nginx, that
+        bucket is shared by every public client.
+    *   `500 Internal Server Error`: a genuine server fault, as in *Error Responses* above; never
+        bad input. A consumer must treat it, like every other non-200, as "no data this time".
+*   **Example:**
+    ```bash
+    curl -s "http://localhost:3000/public/v1/events?lang=ru" | jq '.database, (.events | length)'
+
+    # Revalidate: 304 if nothing has been published since.
+    curl -si -H 'If-None-Match: "<etag from the previous response>"' \
+      "http://localhost:3000/public/v1/events?lang=ru" | head -1
+    ```
+
+This route is rate-limited by connecting IP, as `/health` is, whatever `X-API-KEY` a caller
+sends. Direct
+callers using the same loopback address share one bucket; behind nginx every proxied public
+client collapses into nginx's loopback bucket, which overlaps the operator's direct `/health`
+calls whenever they arrive from the same address. A public rollout puts a cache in front
+of this route (revalidating on the `ETag`) and owns the external per-client and aggregate
+limits; nothing in this service is that protection.
+
+[![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
