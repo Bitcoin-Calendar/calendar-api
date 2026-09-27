@@ -498,6 +498,12 @@ func main() {
 	// month/day query parameters; there are deliberately no by-date routes.
 	// Every handler that touches the database is wrapped so its query carries a
 	// deadline. dbFor picks the deadline up from the request context.
+	//
+	// Both exact-path routes must precede /events/:id. In particular, the empty
+	// wildcard spelling /events/url would otherwise parse "url" as an id, and
+	// a future broader parameter route must not capture the nested path.
+	api.Get("/events/url", timeout.NewWithContext(getEventByURLHandler, queryTimeout))
+	api.Get("/events/url/*", timeout.NewWithContext(getEventByURLHandler, queryTimeout))
 	api.Get("/events/:id", timeout.NewWithContext(getEventHandler, queryTimeout))
 	api.Get("/tags", timeout.NewWithContext(getTagsHandler, queryTimeout))
 	api.Get("/categories", timeout.NewWithContext(getCategoriesHandler, queryTimeout))

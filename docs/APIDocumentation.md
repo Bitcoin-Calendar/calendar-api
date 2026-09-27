@@ -68,6 +68,7 @@ The API provides the following main functionalities:
 
 *   **`/events`**: Retrieve a paginated list of all events, with powerful filtering by date (year, month, day, or combinations), category, and language.
 *   **`/events/:id`**: Fetch a single event by its unique ID.
+*   **`/events/url/*`**: Fetch one event by its complete canonical `/<date>/<slug>/` path.
 *   **`/search`**: Perform a full-text search across event titles, descriptions, and tags.
 *   **`/tags`**: Get a list of all unique event tags and their usage counts.
 *   **`/categories`**: Get every category and its event count — what a client needs to build a category filter.
@@ -207,7 +208,7 @@ Standard HTTP status codes are used. Common error responses include:
 
 ### Rejected input
 
-Four classes of input are answered `400` rather than being quietly absorbed, because in each
+Five classes of input are answered `400` rather than being quietly absorbed, because in each
 case the alternative response is indistinguishable from a legitimate result:
 
 **Date filters.** `month`, `day` and `year` must be plain integers in range (`1`–`12`,
@@ -250,6 +251,13 @@ would again be a `200` and an empty list.
 `200` full of unfiltered results is indistinguishable from a filter that ran. (`/events/:id`
 ignores it, like any other stray parameter: a single-event fetch is not a list a filter could
 narrow, and the response shows the event's real `category`.)
+
+**Canonical event paths.** `/events/url/*` accepts exactly one date segment and one non-empty
+slug segment. The date must be a real `YYYY-MM-DD` date. The leading slash before the date
+and the trailing slash after the slug are optional at the route boundary and are normalized
+to the stored `/<date>/<slug>/` form; inner or additional path segments are not normalized
+away. A missing date, impossible date, missing slug, or extra segment is a `400`, not a
+partial lookup.
 
 **Search expressions.** `q` is passed to SQLite's FTS5 parser, which rejects bare operators
 (`AND`, `OR`, `NOT`), unbalanced parentheses or quotes, and a leading `*`. These are things a
@@ -437,7 +445,73 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/20?lang=ru"
     ```
 
-### 4. Get All Unique Tags
+### 4. Get Single Event by Canonical URL Path
+
+*   **Endpoint:** `/events/url/*`
+*   **Method:** `GET`
+*   **Authentication:** Required. Send the configured key in `X-API-KEY`, as for every
+    route under `/api`.
+*   **Description:** Retrieves one event by exact equality on its complete canonical
+    `url_path`. This is an indexed lookup on `/<date>/<slug>/`; it does not search by slug
+    alone, scan a capped event list, or use numeric IDs to relate the language artifacts.
+    Recurring slug bodies on different dates therefore remain distinct.
+*   **Path:** Supply one real `YYYY-MM-DD` segment and one non-empty slug segment. A leading
+    slash before the date and trailing slash after the slug may be present or absent at the
+    wildcard boundary; both forms normalize to one stored path with both slashes. Slashes
+    inside the date-and-slug pair, including extra segments, are rejected rather than
+    cleaned into another identity.
+*   **Query Parameters:**
+    *   `lang` (optional, string): `en` selects the English artifact and is the default;
+        `ru` selects the Russian artifact. As elsewhere in this API, unsupported values
+        fall back to `en`. The lookup is performed independently in the selected artifact;
+        IDs are not joined across languages.
+*   **Request Body:** None
+*   **Success Response (200 OK):**
+    *   **Content-Type:** `application/json`
+    *   **Body:** `data` contains the complete event object documented above, without a
+        reduced projection. Date-only strings, JSON-encoded `tags`/`media`/`references`,
+        and null values retain their normal authenticated API semantics.
+        ```json
+        {
+          "data": {
+            "id": 267,
+            "date": "2013-08-09",
+            "title": "Hal Finney's last post",
+            "description": "...",
+            "tags": "[\"archives\",\"finney\"]",
+            "media": null,
+            "references": "[\"https://example.org/source\"]",
+            "url_path": "/2013-08-09/hal-finneys-last-post/",
+            "category": "archives",
+            "landmark": true,
+            "created_at": null,
+            "updated_at": null
+          }
+        }
+        ```
+*   **Error Responses:**
+    *   `400 Bad Request`: The wildcard is not one complete, real
+        `YYYY-MM-DD/slug` pair (for example, the date or slug is missing, the date is
+        impossible, or an extra segment is present).
+    *   `401 Unauthorized`: The API key is missing or invalid.
+    *   `404 Not Found`: The path is structurally valid but no event in the selected
+        language artifact has that exact normalized `url_path`.
+    *   `408 Request Timeout`: The database query exceeded the shared five-second query
+        deadline.
+    *   `500 Internal Server Error`: The database query failed for another reason. Query
+        failures are not converted to `404`, and public errors do not expose SQL or database
+        details.
+*   **Examples:**
+    ```bash
+    curl -H "X-API-KEY: your_api_key" \
+      "http://localhost:3000/api/events/url/2013-08-09/hal-finneys-last-post/?lang=en"
+
+    # The absent trailing slash is normalized to the same stored url_path.
+    curl -H "X-API-KEY: your_api_key" \
+      "http://localhost:3000/api/events/url/2013-08-09/hal-finneys-last-post?lang=ru"
+    ```
+
+### 5. Get All Unique Tags
 
 *   **Endpoint:** `/tags`
 *   **Method:** `GET`
@@ -476,7 +550,7 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/tags?lang=ru"
     ```
 
-### 5. Get All Categories
+### 6. Get All Categories
 
 *   **Endpoint:** `/categories`
 *   **Method:** `GET`
@@ -520,7 +594,7 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events?lang=en&category=adoption&landmark=true&limit=5"
     ```
 
-### 6. Get Events by Tag (Paginated)
+### 7. Get Events by Tag (Paginated)
 
 *   **Endpoint:** `/events/tags/:tag`
 *   **Method:** `GET`
@@ -577,7 +651,7 @@ Error responses will typically be in JSON format, like:
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/events/tags/adoption?limit=2&lang=ru"
     ```
 
-### 7. Health
+### 8. Health
 
 *   **Endpoint:** `/health` — note this is at the root, **not** under `/api`
 *   **Method:** `GET`
@@ -670,7 +744,7 @@ See *Startup checks* in [Deployment](Deployment.md).
       .status == "ok" and (.databases | to_entries | all(.value.fts.consistent))'
     ```
 
-### 8. Public events
+### 9. Public events
 
 *   **Endpoint:** `/public/v1/events` — at the root, **not** under `/api`
 *   **Methods:** `GET` and `HEAD` (the same headers, with no response body).

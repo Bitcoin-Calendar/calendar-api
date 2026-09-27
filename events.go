@@ -4,11 +4,77 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	zlog "github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 )
+
+// canonicalEventPath validates the wildcard accepted by /api/events/url/* and
+// returns the one representation stored by canonical: /YYYY-MM-DD/slug/.
+// Only the outer slashes are optional. An inner slash changes the identity and
+// is rejected rather than being cleaned into a different path.
+func canonicalEventPath(raw string) (string, bool) {
+	trimmed := strings.Trim(raw, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 2 {
+		return "", false
+	}
+
+	date, slug := parts[0], parts[1]
+	if len(date) != len("2006-01-02") || date[4] != '-' || date[7] != '-' {
+		return "", false
+	}
+	for i, r := range date {
+		if i == 4 || i == 7 {
+			continue
+		}
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		return "", false
+	}
+	if slug == "" || strings.TrimSpace(slug) != slug || slug == "." || slug == ".." {
+		return "", false
+	}
+
+	return "/" + date + "/" + slug + "/", true
+}
+
+// Handler for /api/events/url/*.
+func getEventByURLHandler(c *fiber.Ctx) error {
+	lang := c.Query("lang", "en")
+	path, ok := canonicalEventPath(c.Params("*"))
+	if !ok {
+		zlog.Warn().Str("path", c.Params("*")).Str("lang", lang).
+			Msg("getEventByURLHandler: invalid canonical event path")
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid event path: expected /YYYY-MM-DD/slug/",
+		})
+	}
+
+	zlog.Info().Str("path", path).Str("lang", lang).Msg("getEventByURLHandler called")
+
+	var event Event
+	result := dbFor(c).Where("url_path = ?", path).First(&event)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			zlog.Warn().Str("path", path).Str("lang", lang).
+				Msg("getEventByURLHandler: event not found")
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Event not found",
+			})
+		}
+		zlog.Error().Str("path", path).Str("lang", lang).Err(result.Error).
+			Msg("getEventByURLHandler: failed to retrieve event")
+		return queryFailed(c, result.Error, "Failed to retrieve event")
+	}
+
+	return c.JSON(fiber.Map{"data": event})
+}
 
 // Handler for /api/events/:id
 func getEventHandler(c *fiber.Ctx) error {

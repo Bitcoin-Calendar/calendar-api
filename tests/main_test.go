@@ -352,7 +352,10 @@ func fixtureRows(lang string) []fixtureRow {
 			Description: "This row lists satoshi twice; canonical no longer does, but the handler must still count events.",
 			Media:       nil, References: nil,
 			CreatedAt: nil, UpdatedAt: nil,
-			Tags: `["satoshi", "archives", "satoshi"]`, URLPath: "/2013-08-09/a-duplicated-tag-lives-here/",
+			// The slug body deliberately repeats event 2's on another date. The
+			// exact-path endpoint must use the complete date-and-slug path rather
+			// than silently collapsing recurring slugs to one event.
+			Tags: `["satoshi", "archives", "satoshi"]`, URLPath: "/2013-08-09/bitcoin-whitepaper-published/",
 			Category: "archives",
 		},
 		{
@@ -380,6 +383,10 @@ func fixtureRows(lang string) []fixtureRow {
 		},
 	}
 	if lang == "ru" {
+		// The same canonical path exists independently in both language
+		// artifacts. A locale-specific title makes reading the wrong database
+		// observable without treating numeric ids as cross-language identity.
+		rows[2].Title = "Повторяющийся slug в русской базе"
 		rows = append(rows, fixtureRow{
 			ID: 4, Date: "2020-12-08",
 			Title:       "Только в русской базе",
