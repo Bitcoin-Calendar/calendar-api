@@ -156,60 +156,32 @@ func getAllEventsHandler(c *fiber.Ctx) error {
 	}
 
 	// category is validated against the vocabulary this artifact actually
-	// carries, read at boot by loadCategories. An unknown value is a 400 for
-	// the same reason a malformed month is: answering 200 with an empty list
-	// makes "there is no such category" indistinguishable from "that category
-	// has no events", and a client cannot tell a typo from a quiet corner of
-	// the corpus.
+	// carries, read at boot by loadCategories; see categoryFilter. Matched
+	// case-insensitively, like the tag filter, and lowercased on the way in
+	// because every stored value is lowercase.
 	//
-	// Matched case-insensitively, like the tag filter, and lowercased on the
-	// way in because every stored value is lowercase.
+	// One value here, as always: repeating the parameter is a search feature,
+	// and this endpoint still reads only the first.
 	if categoryStr := c.Query("category"); categoryStr != "" {
-		want := strings.ToLower(strings.TrimSpace(categoryStr))
-		// resolveLang, not the raw parameter: the vocabulary consulted must be
-		// the one belonging to the artifact this request will actually read.
-		vocab := categoriesByLang[resolveLang(lang)]
-		if !vocab.known(want) {
-			return badParam(c, "category", categoryStr, vocab.expected())
+		want, ok := categoryFilter(c, lang, []string{categoryStr})
+		if !ok {
+			return nil
 		}
 		// LOWER on the column, not a bare equality: the closed set is enforced
 		// by the publisher rather than by the schema, so this must not depend
 		// on the stored casing being what it is today.
-		query = query.Where("LOWER(TRIM(category)) = ?", want)
+		query = query.Where("LOWER(TRIM(category)) = ?", want[0])
 	}
 
 	// landmark is the switch the website calls «Только главное»: one boolean,
 	// orthogonal to category, hiding everything that is not a landmark. It ANDs
 	// with category and with the date filters, so ?category=tech&landmark=true
-	// is "the tech events that matter".
-	//
-	// Presence is checked before the value is parsed, and that order is the
-	// point. Against an artifact predating the column — a rollback target —
-	// `WHERE landmark = ?` is `no such column: landmark`, measured, which would
-	// be a 500 for a question this service can answer perfectly well. It is also
-	// the more useful of the two rejections: "this artifact predates the column"
-	// tells the caller something "expected true or false" cannot.
-	//
-	// Unlike category there is no vocabulary to consult, so an unparseable value
-	// is the only other way to be wrong. It is a 400 rather than a quiet default
-	// for the reason the date filters are: ?landmark=yes silently read as false
-	// answers 200 with the 179 rows the caller least wanted, and nothing in the
-	// response says the filter was not the one asked for.
+	// is "the tech events that matter". Validation, and why presence is checked
+	// before the value is parsed, is in landmarkFilter.
 	if landmarkStr := c.Query("landmark"); landmarkStr != "" {
-		// resolveLang, not the raw parameter, for the reason the category filter
-		// spells out: the artifact consulted must be the one this request reads.
-		flag := landmarkByLang[resolveLang(lang)]
-		if !flag.present {
-			return badParam(c, "landmark", landmarkStr, flag.expected())
-		}
-		// ParseBool rather than a hand-rolled comparison: it is the spelling a Go
-		// client would produce and a documented set (1/t/T/TRUE/true/True and the
-		// false equivalents), so callers who send "1" are not surprised. The
-		// rejection names `true or false` because that is the canonical form to
-		// reach for, not because the others are refused.
-		want, err := strconv.ParseBool(strings.TrimSpace(landmarkStr))
-		if err != nil {
-			return badParam(c, "landmark", landmarkStr, flag.expected())
+		want, ok := landmarkFilter(c, lang, landmarkStr)
+		if !ok {
+			return nil
 		}
 		// No LOWER/TRIM counterpart here: this column is INTEGER NOT NULL, so
 		// unlike category there is no stored casing or padding to defend

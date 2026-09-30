@@ -153,9 +153,44 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Search query is required"})
 	}
 
-	// Search does not narrow by category or landmark. See filterParamRejected.
-	if filterParamRejected(c, "category", "landmark") {
+	// category and landmark narrow the full-text match with the same meaning
+	// they have on /api/events, validated by the same helpers against the same
+	// boot-loaded state. Unlike /api/events, category may be repeated and the
+	// values OR together: a filter UI with several categories ticked must be one
+	// request, because two requests cannot be paged as one result.
+	var categoryValues []string
+	for _, v := range c.Context().QueryArgs().PeekMulti("category") {
+		categoryValues = append(categoryValues, string(v))
+	}
+	categories, ok := categoryFilter(c, lang, categoryValues)
+	if !ok {
 		return nil
+	}
+
+	// The filter is appended to the one WHERE clause both statements below
+	// share, so the total and the page are counted and cut from the same rows.
+	// Filtering in SQL rather than over the scanned page is the point: a page
+	// filtered after LIMIT comes back short, and the total would count rows no
+	// page ever shows.
+	//
+	// Every fragment is a literal from this function; every value is bound.
+	where := "events_fts MATCH ?"
+	args := []interface{}{query}
+	if len(categories) > 0 {
+		// LOWER(TRIM()) on the column for the reason /api/events gives: the
+		// closed set is enforced by the publisher, not by the schema.
+		where += " AND LOWER(TRIM(e.category)) IN (?" + strings.Repeat(", ?", len(categories)-1) + ")"
+		for _, v := range categories {
+			args = append(args, v)
+		}
+	}
+	if landmarkStr := c.Query("landmark"); landmarkStr != "" {
+		want, ok := landmarkFilter(c, lang, landmarkStr)
+		if !ok {
+			return nil
+		}
+		where += " AND e.landmark = ?"
+		args = append(args, want)
 	}
 
 	page, limit, ok := pagination(c)
@@ -187,13 +222,13 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	//
 	// Malformed expressions need no pre-filtering here: SQLite rejects them and
 	// isFTSSyntaxError turns that into a 400.
-	countSQL := `
+	countSQL := fmt.Sprintf(`
 		SELECT COUNT(*)
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
-		WHERE events_fts MATCH ?;
-	`
-	if err := db.Raw(countSQL, query).Scan(&totalEvents).Error; err != nil {
+		WHERE %s;
+	`, where)
+	if err := db.Raw(countSQL, args...).Scan(&totalEvents).Error; err != nil {
 		if isFTSSyntaxError(err) {
 			return badSearchQuery(c, query, lang, err)
 		}
@@ -217,9 +252,14 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 	//
 	// Spliced rather than parameterised because a column name is not a bind
 	// parameter. The value is built here from literals, never from anything a
-	// caller sent. Sprintf is safe on this statement specifically because it
-	// contains no other %% verb; anything added below that needs one must escape
-	// it or this stops being a formatting string.
+	// caller sent, and so is the WHERE clause spliced beside it. Sprintf is safe
+	// on this statement specifically because it contains no other %% verb;
+	// anything added below that needs one must escape it or this stops being a
+	// formatting string.
+	//
+	// A filter never needs its column in this list to be answerable: when a
+	// column is absent its filter was already refused above, so neither
+	// statement names a column the artifact does not have.
 	optionalCols := ""
 	if categoriesByLang[resolveLang(lang)].present {
 		optionalCols += " e.category,"
@@ -252,15 +292,15 @@ func ftsSearchHandler(c *fiber.Ctx) error {
 		       e.url_path,%s e.created_at, e.updated_at
 		FROM events e
 		JOIN events_fts fts ON e.id = fts.rowid
-		WHERE events_fts MATCH ?
+		WHERE %s
 		-- e.id breaks ties in rank. Without it equally-ranked rows come back in
 		-- whatever order the scan produces, which is not required to be the same
 		-- order on the next request — so a caller walking pages can be handed one
 		-- event twice and never shown another.
 		ORDER BY fts.rank, e.id DESC
 		LIMIT ? OFFSET ?;
-	`, optionalCols)
-	if err := db.Raw(searchSQL, query, limit, offset).Scan(&events).Error; err != nil {
+	`, optionalCols, where)
+	if err := db.Raw(searchSQL, append(args, limit, offset)...).Scan(&events).Error; err != nil {
 		if isFTSSyntaxError(err) {
 			return badSearchQuery(c, query, lang, err)
 		}

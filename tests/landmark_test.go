@@ -185,20 +185,16 @@ func TestLandmarkAcceptsTheFormsParseBoolDoes(t *testing.T) {
 
 // TestLandmarkParamRefusedWhereItDoesNotFilter is the ?category= guard's
 // argument applied to the new parameter, and it is here from the start rather
-// than after the fact: /api/search and /api/events/tags/:tag do not narrow by
-// landmark, and accepting the parameter while ignoring it would answer 200 with
-// every match and nothing to say the filter had not been applied.
+// than after the fact: /api/events/tags/:tag does not narrow by landmark, and
+// accepting the parameter while ignoring it would answer 200 with every match
+// and nothing to say the filter had not been applied. Search was guarded the
+// same way until it gained the filter; see search_filters_test.go.
 func TestLandmarkParamRefusedWhereItDoesNotFilter(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		accepted string
 		rejected string
 	}{
-		{
-			name:     "search",
-			accepted: "/api/search?lang=ru&q=satoshi",
-			rejected: "/api/search?lang=ru&q=satoshi&landmark=true",
-		},
 		{
 			name:     "by-tag",
 			accepted: "/api/events/tags/satoshi?lang=ru",
