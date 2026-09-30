@@ -51,7 +51,7 @@ Everything under `/api` requires an `X-API-KEY` header. `/health` and `/public/v
 | `GET /api/events/tags/:tag` | Events carrying a tag. |
 | `GET /api/tags` | Every tag with the number of events carrying it. |
 | `GET /api/categories` | Every category with the number of events carrying it. |
-| `GET /api/search?q=` | Full-text search over title, description and tags. |
+| `GET /api/search?q=` | Full-text search over title, description and tags. Filter with `category` (repeatable) and `landmark`. |
 
 All of them take `lang=en` (default) or `lang=ru`. Full detail, including every field and
 every error, is in [docs/APIDocumentation.md](docs/APIDocumentation.md).
@@ -120,8 +120,13 @@ These are the parts that are not guessable from the endpoint list. Each was a re
     the date filters. Always `true` or `false`, never `null`. Added 2026-08-12: an artifact
     published before then has no such column, and the service then reports `false` everywhere
     and rejects `?landmark=` with a `400` rather than answering a misleading empty list.
-    It is a filter on `/api/events` **only** — sending it to `/api/search` or
+    It is a filter on `/api/events` and `/api/search` — sending it, or `category`, to
     `/api/events/tags/:tag` is a `400` too, rather than a `200` full of unfiltered results.
+*   **`/api/search` takes `category` more than once.** `?q=halving&category=tech&category=fiat`
+    matches either category; `landmark` ANDs with that and with `q`. Both are validated
+    exactly as on `/api/events`, filter before counting and paging — so `total` and every
+    page describe the filtered matches — and never narrow search to a date range. Results
+    stay ordered by relevance, ties broken by `id` descending.
 *   **`events` is always an array**, `[]` when nothing matches, on every endpoint that
     returns a list — and so is `data` on `/api/tags` and `/api/categories`. Never `null`.
 *   **An unknown `lang` silently serves English.** `lang=xx` is not an error. Do not rely on

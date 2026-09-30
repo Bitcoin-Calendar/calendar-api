@@ -142,14 +142,15 @@ func TestUnknownCategoryIsRejected(t *testing.T) {
 	}
 }
 
-// TestCategoryIsRejectedWhereItIsNotAFilter covers the two endpoints that return
-// events and do not filter by category.
+// TestCategoryIsRejectedWhereItIsNotAFilter covers the endpoint that returns
+// events and does not filter by category.
 //
-// Both accepted the parameter and ignored it: &category=bitcoin on a search
+// It accepted the parameter and ignored it, as search once did: &category=bitcoin
 // answered 200 with every match, and nothing in that response distinguishes it
 // from a filter that ran. That is the silent empty result's mirror image — a
 // silent *unfiltered* result — and the same argument applies, so the parameter
-// is refused where it does nothing.
+// is refused where it does nothing. Search filters by category now; see
+// search_filters_test.go.
 //
 // The controls matter here: without them a handler that rejected every request
 // would pass.
@@ -159,11 +160,6 @@ func TestCategoryIsRejectedWhereItIsNotAFilter(t *testing.T) {
 		ok       string // must answer 200 and return events
 		rejected string // the same request with a category appended
 	}{
-		{
-			name:     "search",
-			ok:       "/api/search?lang=ru&q=satoshi",
-			rejected: "/api/search?lang=ru&q=satoshi&category=bitcoin",
-		},
 		{
 			name:     "events by tag",
 			ok:       "/api/events/tags/satoshi?lang=ru",

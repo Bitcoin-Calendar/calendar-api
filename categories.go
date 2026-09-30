@@ -150,6 +150,43 @@ func (c categorySet) expected() string {
 	return "one of: " + strings.Join(s, ", ")
 }
 
+// categoryFilter validates ?category= values against the vocabulary of the
+// artifact this request reads, and returns them as the stored values are
+// spelled: trimmed, lowercased and without repeats, in the order sent. It
+// reports ok=false once it has written the 400 itself, for the reason
+// pagination() does.
+//
+// An unknown value is a 400 for the same reason a malformed month is: answering
+// 200 with an empty list makes "there is no such category" indistinguishable
+// from "that category has no events", and a client cannot tell a typo from a
+// quiet corner of the corpus. Every value is checked, not only the first, so a
+// typo cannot hide behind a valid value sent alongside it.
+//
+// An empty value is skipped, as an absent parameter would be: `?category=` has
+// always meant no filter on /api/events. A value of only spaces is not empty,
+// and is rejected like any other unknown value.
+func categoryFilter(c *fiber.Ctx, lang string, values []string) (want []string, ok bool) {
+	// resolveLang, not the raw parameter: the vocabulary consulted must be the
+	// one belonging to the artifact this request will actually read.
+	vocab := categoriesByLang[resolveLang(lang)]
+	seen := map[string]bool{}
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		w := strings.ToLower(strings.TrimSpace(v))
+		if !vocab.known(w) {
+			badParam(c, "category", v, vocab.expected())
+			return nil, false
+		}
+		if !seen[w] {
+			seen[w] = true
+			want = append(want, w)
+		}
+	}
+	return want, true
+}
+
 // Structure for the /api/categories response
 type CategoryInfo struct {
 	Category string `json:"category"`

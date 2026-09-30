@@ -113,14 +113,16 @@ func badParam(c *fiber.Ctx, name, got, want string) error {
 // helper that returned its error would look like it had refused while the
 // handler carried on and overwrote the body under a 400 status line.
 //
-// Only /api/events honours `category` and `landmark`. The two list endpoints
-// this guards — /api/search and /api/events/tags/:tag — accepted `category` and
-// ignored it: a client narrowing a search with &category=archives got every
-// match, with a 200 and nothing anywhere in the response to say the filter had
-// not been applied. That is the same silence the 400 on an unknown category
-// exists to break, arrived at from the other side. `landmark` was added to the
-// same guard in the same release that added the filter, so it never had a
-// window in which it was silently ignored here.
+// /api/events and /api/search honour `category` and `landmark`. The list
+// endpoint this guards — /api/events/tags/:tag — accepted `category` and
+// ignored it, as search once did: a client narrowing with &category=archives
+// got every match, with a 200 and nothing anywhere in the response to say the
+// filter had not been applied. That is the same silence the 400 on an unknown
+// category exists to break, arrived at from the other side. `landmark` was
+// added to the same guard in the same release that added the filter, so it
+// never had a window in which it was silently ignored here. Search was guarded
+// the same way until it gained both filters, which is the compatible direction
+// described below in practice.
 //
 // /api/events/:id also ignores both and is deliberately not guarded: a fetch by
 // id is not a list a filter could narrow, and the response carries the event's
@@ -149,7 +151,7 @@ func filterParamRejected(c *fiber.Ctx, names ...string) bool {
 		c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fmt.Sprintf(
 				"%s is not a filter on %s, so it is refused rather than ignored. "+
-					"Only /api/events supports ?%s=", name, c.Route().Path, name),
+					"/api/events and /api/search support ?%s=", name, c.Route().Path, name),
 		})
 		return true
 	}

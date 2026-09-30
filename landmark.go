@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 )
 
@@ -100,4 +103,41 @@ func (l landmarkSet) expected() string {
 		return "nothing: this artifact predates the landmark column, so no value can match"
 	}
 	return "true or false"
+}
+
+// landmarkFilter validates a non-empty ?landmark= value against the artifact
+// this request reads and returns the flag asked for. It reports ok=false once
+// it has written the 400 itself, for the reason pagination() does.
+//
+// Presence is checked before the value is parsed, and that order is the point.
+// Against an artifact predating the column — a rollback target — `WHERE
+// landmark = ?` is `no such column: landmark`, measured, which would be a 500
+// for a question this service can answer perfectly well. It is also the more
+// useful of the two rejections: "this artifact predates the column" tells the
+// caller something "expected true or false" cannot.
+//
+// Unlike category there is no vocabulary to consult, so an unparseable value
+// is the only other way to be wrong. It is a 400 rather than a quiet default
+// for the reason the date filters are: ?landmark=yes silently read as false
+// answers 200 with the 179 rows the caller least wanted, and nothing in the
+// response says the filter was not the one asked for.
+func landmarkFilter(c *fiber.Ctx, lang, value string) (want bool, ok bool) {
+	// resolveLang, not the raw parameter, for the reason categoryFilter spells
+	// out: the artifact consulted must be the one this request reads.
+	flag := landmarkByLang[resolveLang(lang)]
+	if !flag.present {
+		badParam(c, "landmark", value, flag.expected())
+		return false, false
+	}
+	// ParseBool rather than a hand-rolled comparison: it is the spelling a Go
+	// client would produce and a documented set (1/t/T/TRUE/true/True and the
+	// false equivalents), so callers who send "1" are not surprised. The
+	// rejection names `true or false` because that is the canonical form to
+	// reach for, not because the others are refused.
+	want, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		badParam(c, "landmark", value, flag.expected())
+		return false, false
+	}
+	return want, true
 }

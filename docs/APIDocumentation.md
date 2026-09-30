@@ -69,7 +69,7 @@ The API provides the following main functionalities:
 *   **`/events`**: Retrieve a paginated list of all events, with powerful filtering by date (year, month, day, or combinations), category, and language.
 *   **`/events/:id`**: Fetch a single event by its unique ID.
 *   **`/events/url/*`**: Fetch one event by its complete canonical `/<date>/<slug>/` path.
-*   **`/search`**: Perform a full-text search across event titles, descriptions, and tags.
+*   **`/search`**: Perform a full-text search across event titles, descriptions, and tags, optionally narrowed by category and landmark.
 *   **`/tags`**: Get a list of all unique event tags and their usage counts.
 *   **`/categories`**: Get every category and its event count — what a client needs to build a category filter.
 *   **`/events/tags/:tag`**: Retrieve a paginated list of events associated with a specific tag.
@@ -246,8 +246,11 @@ carries a value — then **every** `category` value is rejected and `/api/catego
 The message says which of the two it is. Nothing can match in either case, so the alternative
 would again be a `200` and an empty list.
 
-`category` is a filter on `/events` only. Sending it to `/search` or `/events/tags/:tag` is a
-`400` rather than being quietly dropped: those endpoints do not narrow by category, and a
+The same validation applies on `/search`, to every `category` value sent: one unknown value
+among several valid ones is still a `400`.
+
+`category` is a filter on `/events` and `/search`. Sending it to `/events/tags/:tag` is a
+`400` rather than being quietly dropped: that endpoint does not narrow by category, and a
 `200` full of unfiltered results is indistinguishable from a filter that ran. (`/events/:id`
 ignores it, like any other stray parameter: a single-event fetch is not a list a filter could
 narrow, and the response shows the event's real `category`.)
@@ -344,7 +347,7 @@ Error responses will typically be in JSON format, like:
 
 *   **Endpoint:** `/search`
 *   **Method:** `GET`
-*   **Description:** Performs a full-text search across the `title`, `description`, and `tags` fields of events using SQLite's FTS5 extension. Results are sorted by relevance, with `id` descending breaking ties between equally-ranked rows so that paging cannot repeat one event and drop another. Supports language selection and pagination.
+*   **Description:** Performs a full-text search across the `title`, `description`, and `tags` fields of events using SQLite's FTS5 extension. Results are sorted by relevance, with `id` descending breaking ties between equally-ranked rows so that paging cannot repeat one event and drop another. Supports language selection, pagination, and filtering by `category` and `landmark`.
 *   **Query Parameters:**
     *   `q` (required, string): The search query. The query can use FTS5's syntax (e.g., `bitcoin AND halving`, `"satoshi nakamoto"`).
 
@@ -364,7 +367,10 @@ Error responses will typically be in JSON format, like:
     *   `page` (optional, integer): The page number to retrieve. `1`–`1000000`, defaults to `1`. Out of range or unparseable is a `400`.
     *   `limit` (optional, integer): The number of events per page. `1`–`1000`, defaults to `20`. Out of range or unparseable is a `400` — it is not clamped.
     *   `lang` (optional, string): Language for the events. `en` for English (default), `ru` for Russian.
-    *   `category`, `landmark`: **not supported here** — sending either is a `400`, not a silently unfiltered result. Search does not narrow by category or landmark; put the term in `q`, or filter on `/events`.
+    *   `category` (optional, string, repeatable): Return only matches with one of these categories. Repeat the parameter to OR values together — `?q=halving&category=tech&category=fiat` is halving matches in either category. Each value is validated and normalised exactly as on `/events` (trimmed, case-insensitive, checked against the artifact's own vocabulary), so **any** unrecognised value is a `400` even beside valid ones. An empty value is ignored, as on `/events`; a value of only spaces is not empty and is a `400`.
+    *   `landmark` (optional, boolean): Return only matches whose `landmark` flag matches. Same accepted spellings and the same `400`s as on `/events`, including against an artifact that predates the column. ANDs with `q` and with `category`.
+
+    **Filtered pagination.** The filters are applied in SQL before counting and paging, so `pagination.total` and `last_page` count the filtered matches and each page is cut from them — a page is never short because rows were dropped from it afterwards. Order is unchanged: relevance first, then `id` descending. Filters never narrow search to a date range; it always reads the whole corpus of the selected language.
 *   **Request Body:** None
 *   **Success Response (200 OK):**
     *   **Content-Type:** `application/json`
@@ -387,10 +393,14 @@ Error responses will typically be in JSON format, like:
         ```json
         { "error": "Search query is required" }
         ```
+    *   `400 Bad Request`: If `q` is not a valid FTS5 expression, a `category` value is unknown to the artifact, or `landmark` is not a boolean — see *Rejected input*.
 *   **Example:**
     ```bash
     # Search for English events containing "Satoshi"
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/search?q=Satoshi&lang=en"
+
+    # English "halving" landmarks in either of two categories, second page of 10
+    curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/search?q=halving&category=tech&category=fiat&landmark=true&limit=10&page=2&lang=en"
 
     # Search for Russian events about "whitepaper", limit to 5 results
     curl -H "X-API-KEY: your_api_key" "http://localhost:3000/api/search?q=whitepaper&limit=5&lang=ru"
