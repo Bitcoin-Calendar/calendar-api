@@ -40,11 +40,12 @@ Two things about the build are not optional:
 
 ## Endpoints
 
-Everything under `/api` requires an `X-API-KEY` header. `/health` and `/public/v1/events` do not.
+Everything under `/api` requires an `X-API-KEY` header. `/health`, `/public/v1/events` and `/public/v2/events` do not.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Which artifact this process has open, and whether it is fully indexed. Unauthenticated. |
+| `GET /public/v2/events` | The v1 document plus each event’s stored `url_path`, for Calendar permalinks. Unauthenticated, unpaginated, with a version-specific strong `ETag`. |
 | `GET /public/v1/events` | Every event for one language as a single document, for the website. Unauthenticated, unpaginated, with a strong `ETag`. |
 | `GET /api/events` | Events, paginated. Filter with `year`, `month`, `day`, `category`, `landmark`. |
 | `GET /api/events/:id` | One event. |
@@ -58,7 +59,7 @@ every error, is in [docs/APIDocumentation.md](docs/APIDocumentation.md).
 
 ### The public document
 
-`/public/v1/events` is the one read that needs no key, because its consumer is a public
+The public events endpoints need no key, because its consumer is a public
 client the service cannot hand a secret to: the static website (`gm-web`) fetches it once
 from Node at build time, and anyone else may read it the same way. It is not a browser
 fetch, so no CORS origin needs to be added for it. It differs from `/api/events` on purpose:
@@ -244,3 +245,18 @@ would prove.
 The API will be publicly available in Q3 2026. To test it before then, DM
 [@Tony](https://njump.me/npub10awzknjg5r5lajnr53438ndcyjylgqsrnrtq5grs495v42qc6awsj45ys7)
 on Nostr and I'll share a key.
+
+### Public v2 permalinks
+
+`GET /public/v2/events?lang=ru` returns schema `bitcoin-calendar.public-events.v2`.
+It keeps v1's envelope, normalization, ordering, language fallback and cache semantics,
+adding `url_path` to each event verbatim from storage (for example,
+`/2013-08-09/hal-finneys-last-post/`). Consumers build localized links under
+`https://bitcoin-calendar.org/ru/events/`, encoding the date and slug as separate
+path segments. Do not reconstruct the stored path from the historical `date` or title.
+V1 stays available with its original event shape; v1 and v2 have distinct ETags.
+
+Roll out the API before updating gm-web. The public reverse proxy/cache must expose
+`/public/v2/events` with the same protections as v1. Verify an unauthenticated 200,
+the v2 schema and a populated `url_path` through the public origin before the gm-web
+release; deploying gm-web first would omit its history section until v2 is available.

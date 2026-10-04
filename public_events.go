@@ -14,7 +14,7 @@ import (
 // language's artifact as a single document, for a public consumer that cannot
 // be handed an API key: the static website fetches it from Node at build time
 // (not from a browser, so no CORS origin is involved), and anyone else may read
-// it the same way. It is the only route besides /health outside the /api group.
+// it the same way. The v1 and v2 routes sit beside /health outside the /api group.
 //
 // The private list endpoints are built for a bot on loopback: paginated,
 // keyed, and carrying media and references exactly as the artifact stores
@@ -27,10 +27,12 @@ import (
 // fields it could not take as stored so the loss is visible.
 //
 // The schema name is the version. Anything that changes the shape below is a
-// v2 at a new path, not an edit here.
+// new version at a new path, not an edit to an existing DTO.
 const (
-	publicEventsPath   = "/public/v1/events"
-	publicEventsSchema = "bitcoin-calendar.public-events.v1"
+	publicEventsPath     = "/public/v1/events"
+	publicEventsSchema   = "bitcoin-calendar.public-events.v1"
+	publicEventsV2Path   = "/public/v2/events"
+	publicEventsV2Schema = "bitcoin-calendar.public-events.v2"
 )
 
 // PublicEventsResponse is the public document.
@@ -72,6 +74,16 @@ type PublicEvent struct {
 	Media       []string   `json:"media"`
 }
 
+// V2 adds the stored permalink path; v1 retains its original DTO.
+type PublicEventV2 struct {
+	PublicEvent
+	URLPath string `json:"url_path"`
+}
+type PublicEventsV2Response struct {
+	PublicEventsResponse
+	Events []PublicEventV2 `json:"events"`
+}
+
 // stringList decodes one stored media or references value into the array the
 // public contract promises, and reports whether it had to leave anything
 // behind. The list is never nil, so it marshals as [] rather than null.
@@ -110,8 +122,8 @@ func stringList(stored *string) (list []string, invalid bool) {
 // exactly such a change — same artifact, different invalid_*_fields — and
 // without the version in the hash a cache holding the old document would have
 // been told 304 until the next data release.
-func publicEventsETag(lang, artifactSHA256 string) string {
-	sum := sha256.Sum256([]byte(publicEventsSchema + "\n" + version + "\n" + lang + "\n" + artifactSHA256))
+func publicEventsETag(schema, lang, artifactSHA256 string) string {
+	sum := sha256.Sum256([]byte(schema + "\n" + version + "\n" + lang + "\n" + artifactSHA256))
 	return `"` + hex.EncodeToString(sum[:16]) + `"`
 }
 
@@ -132,6 +144,14 @@ func ifNoneMatchHas(header, etag string) bool {
 // publicEventsHandler answers GET /public/v1/events. Registered outside /api,
 // beside /health, and needs no API key.
 func publicEventsHandler(c *fiber.Ctx) error {
+	return servePublicEvents(c, false)
+}
+
+func publicEventsV2Handler(c *fiber.Ctx) error {
+	return servePublicEvents(c, true)
+}
+
+func servePublicEvents(c *fiber.Ctx, v2 bool) error {
 	// resolveLang, not the raw parameter, for the reason every other handler
 	// gives: the language in the document must name the artifact actually read,
 	// and the ETag must follow the artifact rather than the spelling.
@@ -141,7 +161,11 @@ func publicEventsHandler(c *fiber.Ctx) error {
 	// Revalidation is answered before the query: the tag depends only on the
 	// build and startup state, and skipping the work is what the round trip is
 	// for.
-	etag := publicEventsETag(lang, artifact.SHA256)
+	schema := publicEventsSchema
+	if v2 {
+		schema = publicEventsV2Schema
+	}
+	etag := publicEventsETag(schema, lang, artifact.SHA256)
 	if ifNoneMatchHas(c.Get(fiber.HeaderIfNoneMatch), etag) {
 		c.Set(fiber.HeaderETag, etag)
 		c.Status(fiber.StatusNotModified)
@@ -155,7 +179,7 @@ func publicEventsHandler(c *fiber.Ctx) error {
 	}
 
 	doc := PublicEventsResponse{
-		Schema:   publicEventsSchema,
+		Schema:   schema,
 		Language: lang,
 		// From the snapshot rather than counted again: it is the same file,
 		// opened read-only, and /health and this document must not be able to
@@ -189,5 +213,12 @@ func publicEventsHandler(c *fiber.Ctx) error {
 	}
 
 	c.Set(fiber.HeaderETag, etag)
+	if v2 {
+		linked := make([]PublicEventV2, 0, len(events))
+		for i, e := range events {
+			linked = append(linked, PublicEventV2{PublicEvent: doc.Events[i], URLPath: e.URLPath})
+		}
+		return c.JSON(PublicEventsV2Response{PublicEventsResponse: doc, Events: linked})
+	}
 	return c.JSON(doc)
 }
