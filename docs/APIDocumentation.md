@@ -877,3 +877,12 @@ of this route (revalidating on the `ETag`) and owns the external per-client and 
 limits; nothing in this service is that protection.
 
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
+
+### 8.1 Public events v2
+
+`GET /public/v2/events` accepts the same `lang` parameter and needs no API key.
+The response follows section 8 with schema `bitcoin-calendar.public-events.v2`
+and one additional event field, `url_path`: the stored `/<date>/<slug>/` permalink
+path. References and media remain arrays. The v1 shape is unchanged. ETags include
+the schema version, so a v1 validator cannot return 304 for v2. The same deadlines,
+IP rate limits, language fallback and optional-field normalization apply.

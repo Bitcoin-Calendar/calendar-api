@@ -486,12 +486,13 @@ func main() {
 	// check the publisher runs after every release.
 	app.Get("/health", healthHandler)
 
-	// The public read, and the only other route outside /api: gm-web fetches
+	// The versioned public reads outside /api: gm-web fetches
 	// it from Node at build time (not from a browser) and, being a public
 	// client, cannot be handed a key. It reads the database, so it carries the
 	// same deadline as everything under /api.
 	// Fiber also registers HEAD; the existing CORS middleware handles preflight.
 	app.Get(publicEventsPath, timeout.NewWithContext(publicEventsHandler, queryTimeout))
+	app.Get(publicEventsV2Path, timeout.NewWithContext(publicEventsV2Handler, queryTimeout))
 
 	// Setup routes
 	api := app.Group("/api", authMiddleware)
