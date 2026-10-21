@@ -149,7 +149,7 @@ These are the parts that are not guessable from the endpoint list. Each was a re
 *   **Lists are newest first, ties broken by `id` descending.** 19 dates carry more than one
     event in English, and without the tiebreaker paging across one could show an event twice
     and skip another.
-*   **Rate limiting under `/api` is 100/min per API key.** Give each consumer its own key: they all reach
+*   **Rate limiting under `/api` is 500/min per API key.** Public and unauthenticated requests retain a 100/min per-IP limit. Give each consumer its own key: they all reach
     the service over loopback, so anything keyed per-IP would be one shared budget.
 
 ## Health

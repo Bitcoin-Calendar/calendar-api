@@ -33,8 +33,9 @@ Browser-based clients must comply with Cross-Origin Resource Sharing (CORS) rule
 
 ## Rate Limiting
 
-**100 requests per minute, per API key under `/api`** (per connecting IP on `/health` and
-`/public/v1/events`). Each caller should therefore have its own key — ask for one rather
+**500 requests per minute, per API key under `/api`**. Public and unauthenticated requests retain
+**100 requests per minute, per connecting IP**, including `/health` and both public event
+versions. Each caller should therefore have its own key — ask for one rather
 than sharing.
 
 It is keyed on the API key rather than the client address deliberately: every consumer of

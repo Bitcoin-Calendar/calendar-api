@@ -25,7 +25,7 @@ const (
 	// caller its own budget rather than one shared per-IP bucket.
 	apiKey2 = "test-key-2"
 	// A third, for the tests that sweep a matrix of parameters. The limiter
-	// allows 100 requests a minute per key, and a table of a dozen probes across
+	// allows 500 requests a minute per key, and a table of a dozen probes across
 	// three endpoints spends enough of the default key's budget to leave later
 	// tests answering 429 — a failure that reads like a bug in whatever ran
 	// last. Per-key budgets are the point of the limiter's design, so the fix is

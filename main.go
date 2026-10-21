@@ -436,7 +436,7 @@ func main() {
 		Output: os.Stdout,
 	}))
 
-	app.Use(limiter.New(limiter.Config{
+	limitConfig := limiter.Config{
 		Max:        100,
 		Expiration: 1 * time.Minute,
 		// Key on the API key, not the IP. Every consumer of this service runs
@@ -473,7 +473,18 @@ func main() {
 				"error": "Rate limit exceeded, please try again later.",
 			})
 		},
-	}))
+	}
+	authenticatedLimitConfig := limitConfig
+	authenticatedLimitConfig.Max = 500
+	authenticatedLimiter := limiter.New(authenticatedLimitConfig)
+	publicLimiter := limiter.New(limitConfig)
+	app.Use(func(context *fiber.Ctx) error {
+		path := strings.ToLower(context.Path())
+		if context.Get("X-API-KEY") != "" && (path == "/api" || strings.HasPrefix(path, "/api/")) {
+			return authenticatedLimiter(context)
+		}
+		return publicLimiter(context)
+	})
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     getAllowedOrigins(),

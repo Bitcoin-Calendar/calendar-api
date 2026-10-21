@@ -346,7 +346,7 @@ func TestListOrderBreaksTiesById(t *testing.T) {
 // throttling each other, with intermittent 429s as the only symptom.
 //
 // The measurement is a delta rather than an exhaustion: spending budget on one
-// key must not move the other key's counter. Exhausting a 100/min bucket would
+// key must not move the other key's counter. Exhausting a 500/min bucket would
 // leave the rest of the suite rate-limited for the following minute.
 func TestRateLimitIsPerAPIKey(t *testing.T) {
 	remaining := func(key string) int {
