@@ -260,3 +260,20 @@ Roll out the API before updating gm-web. The public reverse proxy/cache must exp
 `/public/v2/events` with the same protections as v1. Verify an unauthenticated 200,
 the v2 schema and a populated `url_path` through the public origin before the gm-web
 release; deploying gm-web first would omit its history section until v2 is available.
+
+### Editorial articles
+
+Optional `articles` / `event_articles` tables carry independently published Markdown
+articles and local event relations. Authenticated `GET /api/articles?lang=ru` returns
+published summaries, `GET /api/articles/:slug?lang=ru` returns a full article with
+related events and verified published translations, and `GET /api/events/:id/articles`
+returns a primary article or null plus extra summaries. Drafts are never exposed.
+These additive routes do not change public event documents or event search.
+Old artifacts remain readable; article routes return 503 if the optional schema is
+missing or incomplete. The service performs no schema migration. The release schema
+guard also compares the article tables, constraints and relation indexes when present.
+
+Article detail may include an optional `metadata` JSON object containing editorial
+`title`, `description` and `image` (`url`, `alt`, `width`, `height`, `credit`).
+Legacy article artifacts without this nullable column remain supported. Metadata
+is independent of historical event dates and is omitted from article summaries.

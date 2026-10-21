@@ -215,6 +215,10 @@ func seedArtifact(path, lang string) error {
 		}
 	}
 
+	if err := seedArticles(db, lang); err != nil {
+		return err
+	}
+
 	// Leave nothing beside the .db: a WAL header or a journal makes the file
 	// unreadable at 0444, which is the invariant a release must hold.
 	if _, err := db.Exec(`PRAGMA journal_mode=DELETE`); err != nil {

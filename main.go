@@ -518,10 +518,13 @@ func main() {
 	// a future broader parameter route must not capture the nested path.
 	api.Get("/events/url", timeout.NewWithContext(getEventByURLHandler, queryTimeout))
 	api.Get("/events/url/*", timeout.NewWithContext(getEventByURLHandler, queryTimeout))
+	api.Get("/articles", timeout.NewWithContext(listArticlesHandler, queryTimeout))
+	api.Get("/articles/:slug", timeout.NewWithContext(getArticleHandler, queryTimeout))
+	api.Get("/events/tags/:tag", timeout.NewWithContext(getEventsByTagHandler, queryTimeout))
+	api.Get("/events/:id/articles", timeout.NewWithContext(getEventArticlesHandler, queryTimeout))
 	api.Get("/events/:id", timeout.NewWithContext(getEventHandler, queryTimeout))
 	api.Get("/tags", timeout.NewWithContext(getTagsHandler, queryTimeout))
 	api.Get("/categories", timeout.NewWithContext(getCategoriesHandler, queryTimeout))
-	api.Get("/events/tags/:tag", timeout.NewWithContext(getEventsByTagHandler, queryTimeout))
 	api.Get("/events", timeout.NewWithContext(getAllEventsHandler, queryTimeout))
 
 	api.Get("/search", timeout.NewWithContext(ftsSearchHandler, queryTimeout))

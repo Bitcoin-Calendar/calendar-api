@@ -887,3 +887,29 @@ and one additional event field, `url_path`: the stored `/<date>/<slug>/` permali
 path. References and media remain arrays. The v1 shape is unchanged. ETags include
 the schema version, so a v1 validator cannot return 304 for v2. The same deadlines,
 IP rate limits, language fallback and optional-field normalization apply.
+
+## Editorial articles
+
+All article routes require the usual API key and use the existing language resolution.
+
+- `GET /api/articles?lang=ru`: `{ "articles": [...] }`, all published summaries ordered
+  by unique slug. Summary fields: `article_key`, `slug`, `title`, `sources` (a native
+  string array), `created_at`, `updated_at`, `published_at`. No body is included.
+- `GET /api/articles/:slug?lang=ru`: `{ "data": { ...summary, "body_markdown": "...",
+  "related_events": [...], "translations": [{ "locale": "en", "slug": "..." }] } }`.
+  Related events use the existing full event shape and sort by date ASC, id ASC.
+  Translations require the same stable key and published status in the other artifact.
+- `GET /api/events/:id/articles?lang=ru`: `{ "primary": <detail or null>, "extra": [...] }`.
+  Extras are summaries, ordered by relation `sort_order` then unique article slug.
+
+A missing/draft article returns 404 `Article not found` without content. A missing
+parent event returns 404 `Event not found`; a valid event without published relations
+returns primary null and extra []. Missing/incomplete article schema returns 503
+`Articles unavailable for this artifact`. Database/query errors remain 500 (deadline
+expiry follows the normal timeout path). There is no draft preview or write endpoint.
+Historical event dates, event search and public v1/v2 contracts are unchanged.
+
+Article detail may include an optional `metadata` JSON object containing editorial
+`title`, `description` and `image` (`url`, `alt`, `width`, `height`, `credit`).
+Legacy article artifacts without this nullable column remain supported. Metadata
+is independent of historical event dates and is omitted from article summaries.

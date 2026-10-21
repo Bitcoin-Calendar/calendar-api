@@ -129,6 +129,7 @@ func TestEventsArrayIsNeverNull(t *testing.T) {
 		"/api/search?lang=ru&q=zzzznotathing",
 		"/api/events?lang=ru&month=1&day=1&page=9999",
 		"/api/events/tags/zzzznotatag?lang=ru",
+		"/api/events/tags/articles?lang=ru",
 	}
 
 	for _, p := range paths {
