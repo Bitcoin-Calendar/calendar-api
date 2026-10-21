@@ -170,3 +170,24 @@ assume a table exists in both files because you found it in one.
     It does not proxy, validate or rewrite them.
 
 [![⚡️zapmeacoffee](https://img.shields.io/badge/⚡️zap_-me_a_coffee-violet?style=plastic)](https://zapmeacoffee.com/npub1tcalvjvswjh5rwhr3gywmfjzghthexjpddzvlxre9wxfqz4euqys0309hn)
+
+## Optional editorial articles
+
+`articles` stores one language's article under an immutable `article_key` (TEXT primary
+key) and a separate unique `slug`. Its `title`, `body_markdown`, JSON URL-array `sources`,
+`status` (`draft` or `published`) and UTC editorial timestamps are separate from event
+fields. Only published rows are served; publication requires `published_at`.
+Corresponding translations are manually assigned the same key in the two artifacts.
+An absent translation is legal; matching numeric event IDs or slugs is not a join.
+
+`event_articles(event_id, article_key, is_primary, sort_order)` uses local foreign keys
+with restricted deletion and a composite primary key. A partial unique index on
+`event_id WHERE is_primary=1` permits at most one full embedded article per event.
+Other relations are links. Related events sort by historical date then local ID.
+Article Markdown does not enter `events_fts`. The canonical authoring schema and
+validator own these constraints; the API only reads the published artifact.
+
+Article detail may include an optional `metadata` JSON object containing editorial
+`title`, `description` and `image` (`url`, `alt`, `width`, `height`, `credit`).
+Legacy article artifacts without this nullable column remain supported. Metadata
+is independent of historical event dates and is omitted from article summaries.

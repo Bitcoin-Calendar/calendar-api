@@ -232,6 +232,8 @@ func TestFixtureSchemaMatchesCanonical(t *testing.T) {
 				"require the API to emit a column it cannot read.", col)
 		}
 	}
+
+	compareArticleSchema(t, path)
 }
 
 // eventColumns reads the column names of the events table straight out of the
