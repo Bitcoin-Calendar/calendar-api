@@ -48,6 +48,6 @@ clean:
 # Produce a binary that will actually run on the box, from any host with
 # Docker. Same build line, glibc userland.
 build-ubuntu:
-	docker run --rm -v "$(CURDIR)":/src -w /src golang:1.23-bookworm \
+	docker run --rm -v "$(CURDIR)":/src -w /src golang:1.24-bookworm \
 		sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends gcc libc6-dev >/dev/null && \
 		       $(BUILD_ENV) go build $(BUILD_FLAGS) -o $(BINARY) .'
