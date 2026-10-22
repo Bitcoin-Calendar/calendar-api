@@ -38,6 +38,8 @@ Two things about the build are not optional:
     binary to the C library it was built against; one built on macOS or Alpine will not start
     on the server at all.
 
+Building requires Go 1.24 or newer.
+
 ## Endpoints
 
 Everything under `/api` requires an `X-API-KEY` header. `/health`, `/public/v1/events` and `/public/v2/events` do not.
